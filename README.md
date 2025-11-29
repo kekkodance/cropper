@@ -3,7 +3,17 @@
 
 ---
 
+<img width="1202" height="812" alt="zy3opy" src="https://github.com/user-attachments/assets/8c8f03a9-6fc5-41f7-b62d-f2a5a6917676" />
+
+---
+
+<br>
 Meant to fullfill a purpose, that of creating cropped versions of art to then post onto Patreon, as setting an entire artwork as the blurred preview is too revealing.
+<br><br>
+
+---
+
+<img width="1202" height="812" alt="p68clz" src="https://github.com/user-attachments/assets/67e9f4bb-e2d3-4631-bcfb-460df97cb8b3" />
 
 ---
 
