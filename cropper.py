@@ -138,9 +138,9 @@ class cropper:
             target_bg = BRAND if mode == "free" else BTN_BG
             r1, g1, b1 = 13, 13, 13
             r2, g2, b2 = int(target_bg[1:3], 16), int(target_bg[3:5], 16), int(target_bg[5:7], 16)
-            r = int(r1 + (r2 - r1) * alpha)
-            g = int(g1 + (g2 - g1) * alpha)
-            b = int(b1 + (b2 - b1) * alpha)
+            r = int(13 + (0 - 13) * alpha)
+            g = int(13 + (71 - 13) * alpha)
+            b = int(13 + (171 - 13) * alpha)
             btn.config(bg=f"#{r:02x}{g:02x}{b:02x}", fg="white")
         self.root.after(15, lambda: self._fade_buttons_step(step + 1))
 
@@ -322,4 +322,5 @@ if __name__ == "__main__":
         p = sys.argv[1].strip("{}")
         if os.path.isfile(p):
             root.after(500, lambda: app.load(p))
+
     root.mainloop()
