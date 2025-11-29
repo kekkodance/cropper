@@ -1,4 +1,8 @@
-# cropper
+<h1>
+  <img src="https://raw.githubusercontent.com/kekkodance/cropper/main/icon.ico" width="40">
+  cropper
+</h1>
+  
 **A tool that easily creates cropped versions of artwork.**
 
 ---
