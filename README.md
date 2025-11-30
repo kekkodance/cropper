@@ -5,6 +5,7 @@
 <p align="center">
 <strong>A tool to easily create cropped or blurred/pixelated versions of your artwork.</strong>
 </p>
+
 ---
 
 <img width="1202" height="852" alt="29upm9" src="https://github.com/user-attachments/assets/ee874703-7c45-46aa-bf46-8f14f1d0d3c9" />
