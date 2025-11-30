@@ -26,8 +26,8 @@ Meant to fullfill a purpose, that of creating cropped / obfuscated versions of a
 
 ---
 
-**If you wish to build this yourself instead, use nuitka with this long command:**
+**If you wish to build this yourself instead, use nuitka with this command:**
 
 ```sh
-nuitka --onefile --windows-icon-from-ico=icon.ico --include-data-file=icon.ico=icon.ico --include-data-file=icon.png=icon.png --remove-output --nofollow-import-to=test --nofollow-import-to=distutils --nofollow-import-to=setuptools --nofollow-import-to=numpy --nofollow-import-to=PIL.GifImagePlugin --nofollow-import-to=PIL.TiffImagePlugin --nofollow-import-to=PIL.WebPImagePlugin --nofollow-import-to=PIL.PsdImagePlugin --nofollow-import-to=PIL.BmpImagePlugin --nofollow-import-to=PIL.PcxImagePlugin --nofollow-import-to=PIL.MpegImagePlugin --nofollow-import-to=PIL.MicImagePlugin --nofollow-import-to=PIL.PdfImagePlugin --nofollow-import-to=PIL.ImImagePlugin --nofollow-import-to=PIL.FpxImagePlugin --nofollow-import-to=PIL.FliImagePlugin --nofollow-import-to=PIL.MpoImagePlugin --nofollow-import-to=PIL.SgiImagePlugin --nofollow-import-to=PIL.TgaImagePlugin --nofollow-import-to=PIL.WmfImagePlugin --nofollow-import-to=PIL.XbmImagePlugin --nofollow-import-to=PIL.XpmImagePlugin --nofollow-import-to=PIL.IptcImagePlugin --nofollow-import-to=PIL.SpiderImagePlugin --nofollow-import-to=PIL.ImageFont --nofollow-import-to=PIL.ImageShow --lto=yes --enable-plugin=tk-inter --mingw64 --windows-console-mode=disable cropper.py
+nuitka --onefile --windows-icon-from-ico=icon.ico --include-data-file=icon.ico=icon.ico --include-data-file=icon.png=icon.png --remove-output --nofollow-import-to=test --nofollow-import-to=distutils --nofollow-import-to=setuptools --nofollow-import-to=numpy --lto=yes --enable-plugin=tk-inter --mingw64 --windows-console-mode=disable cropper.py
 ```
