@@ -18,11 +18,15 @@ Meant to fullfill a purpose, that of creating cropped / obfuscated versions of a
 
 ---
 
-<img width="1202" height="852" alt="yipqts" src="https://github.com/user-attachments/assets/d17f66ff-acbf-415a-b911-9430f8ea9e8c" />
+<img width="1202" height="852" alt="yipqts" src="https://github.com/user-attachments/assets/d17f66ff-acbf-415a-b911-9430f8ea9e8c" />  
+
+&nbsp;
+
+<p><strong>You can download it (for Windows) in the <a href="https://github.com/kekkodance/cropper/releases/latest"><i>Releases</i></a> section.</strong></p>
 
 ---
 
-**If you wish to build this yourself, use nuitka with this long command:**
+**If you wish to build this yourself instead, use nuitka with this long command:**
 
 ```sh
 nuitka --onefile --windows-icon-from-ico=icon.ico --include-data-file=icon.ico=icon.ico --include-data-file=icon.png=icon.png --remove-output --nofollow-import-to=test --nofollow-import-to=distutils --nofollow-import-to=setuptools --nofollow-import-to=numpy --nofollow-import-to=PIL.GifImagePlugin --nofollow-import-to=PIL.TiffImagePlugin --nofollow-import-to=PIL.WebPImagePlugin --nofollow-import-to=PIL.PsdImagePlugin --nofollow-import-to=PIL.BmpImagePlugin --nofollow-import-to=PIL.PcxImagePlugin --nofollow-import-to=PIL.MpegImagePlugin --nofollow-import-to=PIL.MicImagePlugin --nofollow-import-to=PIL.PdfImagePlugin --nofollow-import-to=PIL.ImImagePlugin --nofollow-import-to=PIL.FpxImagePlugin --nofollow-import-to=PIL.FliImagePlugin --nofollow-import-to=PIL.MpoImagePlugin --nofollow-import-to=PIL.SgiImagePlugin --nofollow-import-to=PIL.TgaImagePlugin --nofollow-import-to=PIL.WmfImagePlugin --nofollow-import-to=PIL.XbmImagePlugin --nofollow-import-to=PIL.XpmImagePlugin --nofollow-import-to=PIL.IptcImagePlugin --nofollow-import-to=PIL.SpiderImagePlugin --nofollow-import-to=PIL.ImageFont --nofollow-import-to=PIL.ImageShow --lto=yes --enable-plugin=tk-inter --mingw64 --windows-console-mode=disable cropper.py
