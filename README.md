@@ -1,28 +1,28 @@
-<h1>
+<h1 align="center">
   <img src="https://raw.githubusercontent.com/kekkodance/cropper/main/icon.ico" width="40">
   cropper
 </h1>
-  
-**A tool that easily creates cropped versions of artwork.**
-
+<p align="center">
+<strong>A tool to easily create cropped or blurred/pixelated versions of your artwork.</strong>
+</p>
 ---
 
-<img width="1202" height="812" alt="zy3opy" src="https://github.com/user-attachments/assets/8c8f03a9-6fc5-41f7-b62d-f2a5a6917676" />
+<img width="1202" height="852" alt="29upm9" src="https://github.com/user-attachments/assets/ee874703-7c45-46aa-bf46-8f14f1d0d3c9" />
 
 ---
 
 <br>
-Meant to fullfill a purpose, that of creating cropped versions of art to then post onto Patreon, as setting an entire artwork as the blurred preview is too revealing.
+Meant to fullfill a purpose, that of creating cropped / obfuscated versions of art to then post onto Patreon, because an entire drawing as the blurred preview is too revealing.
 <br><br>
 
 ---
 
-<img width="1202" height="812" alt="p68clz" src="https://github.com/user-attachments/assets/67e9f4bb-e2d3-4631-bcfb-460df97cb8b3" />
+<img width="1202" height="852" alt="yipqts" src="https://github.com/user-attachments/assets/d17f66ff-acbf-415a-b911-9430f8ea9e8c" />
 
 ---
 
-**If you wish to build this yourself, use pyinstaller with this command:**
+**If you wish to build this yourself, use nuitka with this long command:**
 
 ```sh
-pyinstaller --onefile --windowed --icon=icon.ico --add-data "icon.ico;." --name "Cropper" --optimize 2 --clean cropper.py
+nuitka --onefile --windows-icon-from-ico=icon.ico --include-data-file=icon.ico=icon.ico --include-data-file=icon.png=icon.png --remove-output --nofollow-import-to=test --nofollow-import-to=distutils --nofollow-import-to=setuptools --nofollow-import-to=numpy --nofollow-import-to=PIL.GifImagePlugin --nofollow-import-to=PIL.TiffImagePlugin --nofollow-import-to=PIL.WebPImagePlugin --nofollow-import-to=PIL.PsdImagePlugin --nofollow-import-to=PIL.BmpImagePlugin --nofollow-import-to=PIL.PcxImagePlugin --nofollow-import-to=PIL.MpegImagePlugin --nofollow-import-to=PIL.MicImagePlugin --nofollow-import-to=PIL.PdfImagePlugin --nofollow-import-to=PIL.ImImagePlugin --nofollow-import-to=PIL.FpxImagePlugin --nofollow-import-to=PIL.FliImagePlugin --nofollow-import-to=PIL.MpoImagePlugin --nofollow-import-to=PIL.SgiImagePlugin --nofollow-import-to=PIL.TgaImagePlugin --nofollow-import-to=PIL.WmfImagePlugin --nofollow-import-to=PIL.XbmImagePlugin --nofollow-import-to=PIL.XpmImagePlugin --nofollow-import-to=PIL.IptcImagePlugin --nofollow-import-to=PIL.SpiderImagePlugin --nofollow-import-to=PIL.ImageFont --nofollow-import-to=PIL.ImageShow --lto=yes --enable-plugin=tk-inter --mingw64 --windows-console-mode=disable cropper.py
 ```
