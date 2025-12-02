@@ -36,12 +36,17 @@ class GridTile:
         self.offset_x = 0
         self.offset_y = 0
         self.scale = 1.0
+        # Tracks the last rendered size to keep zoom position relative during layout changes
+        self.last_render_w = 0 
+        self.last_render_h = 0
         self.tk_ref = None
 
     def reset(self):
         self.offset_x = 0
         self.offset_y = 0
         self.scale = 1.0
+        self.last_render_w = 0
+        self.last_render_h = 0
 
 class ModernSlider(Canvas):
     def __init__(self, master, from_=0, to=100, initial=25, command=None, release_command=None, **kwargs):
@@ -198,7 +203,8 @@ class Cropper:
 
         # --- GRID CONTROLS ---
         self.grid_controls = Frame(self.bottom_bar, bg=BG)
-        Label(self.grid_controls, text="Cols:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(0,5))
+        
+        Label(self.grid_controls, text="Columns:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(0,5))
         self.lbl_cols_val = Label(self.grid_controls, text="2", bg=BG, fg="#666666", width=2, font=("Segoe UI", 10))
         self.lbl_cols_val.pack(side="left", padx=(0, 0))
         self.slider_cols = ModernSlider(self.grid_controls, from_=1, to=5, initial=2, width=80, command=self.update_grid_cols)
@@ -224,8 +230,9 @@ class Cropper:
 
         Label(self.grid_controls, text="Banners:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(15,5))
         self.banner_btns = {}
+        
         for side in ['left', 'top', 'bottom', 'right']:
-            btn = Button(self.grid_controls, text=side[0].upper(), **control_btn_style, bg=BTN_BG, fg=TEXT_INACTIVE, width=2, command=lambda s=side: self.toggle_banner(s))
+            btn = Button(self.grid_controls, text=side.capitalize(), **control_btn_style, bg=BTN_BG, fg=TEXT_INACTIVE, width=6, command=lambda s=side: self.toggle_banner(s))
             btn.pack(side="left", padx=2)
             self.banner_btns[side] = btn
 
@@ -1235,7 +1242,24 @@ class Cropper:
             cell_ratio = cw / ch
             if img_ratio > cell_ratio: base_h = ch; base_w = base_h * img_ratio
             else: base_w = cw; base_h = base_w / img_ratio
-            render_w = int(base_w * tile.scale); render_h = int(base_h * tile.scale)
+            
+            # Calculate current render size
+            render_w = int(base_w * tile.scale)
+            render_h = int(base_h * tile.scale)
+            
+            # --- FIX: PROPORTIONAL OFFSET ADJUSTMENT ---
+            # If the render size changed due to layout shift or fitting strategy change,
+            # scale the offset to keep the visual center stable.
+            if tile.last_render_w > 0 and tile.last_render_h > 0:
+                if render_w != tile.last_render_w:
+                    tile.offset_x = tile.offset_x * (render_w / tile.last_render_w)
+                if render_h != tile.last_render_h:
+                    tile.offset_y = tile.offset_y * (render_h / tile.last_render_h)
+            
+            # Update last known size
+            tile.last_render_w = render_w
+            tile.last_render_h = render_h
+            # -------------------------------------------
             
             # --- SAFETY CLAMP: Ensure image is not out of bounds when layout changes ---
             max_off_x = (render_w - cw) / 2
@@ -1253,7 +1277,10 @@ class Cropper:
                 img_cx = render_w // 2; img_cy = render_h // 2
                 left = img_cx - (cw // 2) - tile.offset_x; top = img_cy - (ch // 2) - tile.offset_y
                 right = left + cw; bottom = top + ch
-                cropped = small.crop((left, top, right, bottom))
+                
+                # Use int() to ensure crop box coordinates are valid
+                cropped = small.crop((int(left), int(top), int(right), int(bottom)))
+                
                 tk_img = ImageTk.PhotoImage(cropped)
                 tile.tk_ref = tk_img 
                 self.canvas.delete(f"tile_{i}")
