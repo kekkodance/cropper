@@ -2,15 +2,18 @@ import sys
 import os
 import ctypes
 import math
+import json
 from pathlib import Path
 import tkinter as tk
-from tkinter import Canvas, NW, BOTH, Button, Frame, Label, IntVar, StringVar, Entry
+from tkinter import Canvas, NW, BOTH, Button, Frame, Label, IntVar, StringVar, Entry, Toplevel, messagebox, colorchooser
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from PIL import Image, ImageTk, ImageFilter, ImageDraw, ImageGrab
+import cv2
+import numpy as np
+import webbrowser
 
-# --- CONFIGURATION ---
 TITLE = "Cropper"
-BRAND = "#0047AB"
+DEFAULT_BRAND = "#0047AB"
 BG = "#0d0d0d"
 CANVAS_BG = "#111111"
 BTN_BG = "#1a1a1a"
@@ -20,23 +23,221 @@ TEXT_ACTIVE = "#ffffff"
 HIGHLIGHT_COLOR = "#FFD700" 
 PADDING = 20 
 DEFAULT_BANNER_THICKNESS_RATIO = 0.25 
-HANDLE_SIZE = 8 # Size of resize handles
+HANDLE_SIZE = 8 
+SETTINGS_FILE = "cropper_settings.json"
 
-# --- HELPER CLASSES ---
+
+class TitleBarButton(Canvas):
+    def __init__(self, master, btn_type="min", command=None, hover_color="#2a2a2a", **kwargs):
+        super().__init__(master, bg="#0d0d0d", width=46, height=32, highlightthickness=0, **kwargs)
+        self.btn_type = btn_type
+        self.command = command
+        self.hover_color = hover_color
+        self.default_bg = "#0d0d0d"
+        self.icon_color = "#ffffff"
+        
+        self.bind("<Enter>", self.on_enter)
+        self.bind("<Leave>", self.on_leave)
+        self.bind("<Button-1>", self.on_click)
+        self.bind("<Configure>", self.on_resize)
+        
+        self.draw_icon()
+
+    def on_resize(self, event):
+        self.draw_icon()
+
+    def draw_icon(self):
+        self.delete("all")
+        w = self.winfo_width()
+        h = self.winfo_height()
+        
+        if w <= 1: w = 46
+        if h <= 1: h = 32
+        
+        cx, cy = w / 2, h / 2
+        
+        if self.btn_type == "close":
+            pad = 5.8
+            self.create_line(cx-pad, cy-pad, cx+pad, cy+pad, width=1, fill=self.icon_color)
+            self.create_line(cx+pad, cy-pad, cx-pad, cy+pad, width=1, fill=self.icon_color)
+            
+        elif self.btn_type == "max":
+            pad = 5
+            self.create_rectangle(cx-pad, cy-pad, cx+pad, cy+pad, outline=self.icon_color, width=1)
+            
+        elif self.btn_type == "restore":
+            pad = 5
+            off = 2
+            self.create_polyline(cx-pad+off, cy-pad-off, cx+pad+off, cy-pad-off, 
+                                 cx+pad+off, cy+pad-off, cx+pad-off, cy+pad-off, 
+                                 fill="", outline=self.icon_color)
+            self.create_rectangle(cx-pad-off, cy-pad+off, cx+pad-off, cy+pad+off, outline=self.icon_color, width=1)
+
+        elif self.btn_type == "min":
+            self.create_line(cx-5, cy, cx+5, cy, width=1, fill=self.icon_color)
+
+    def on_enter(self, e):
+        self.config(bg=self.hover_color)
+
+    def on_leave(self, e):
+        self.config(bg=self.default_bg)
+
+    def on_click(self, e):
+        if self.command:
+            self.command()
+
+class CustomTitleBar(Frame):
+    def __init__(self, master, title_text="Cropper", brand_color="#0047AB", close_cmd=None, is_dialog=False, icon_path=None, **kwargs):
+        super().__init__(master, bg="#0d0d0d", height=35, **kwargs)
+        self.master = master
+        self.pack_propagate(False)
+        self._drag_data = {"x": 0, "y": 0}
+        
+        self.separator = Frame(self, bg="#333333", height=1)
+        self.separator.pack(side="bottom", fill="x")
+
+        self.content_frame = Frame(self, bg="#0d0d0d")
+        self.content_frame.pack(side="top", fill="both", expand=True)
+
+        self.icon_lbl = None
+        if icon_path and os.path.exists(icon_path):
+            try:
+                pil_icon = Image.open(icon_path).resize((20, 20), Image.Resampling.LANCZOS)
+                self.icon_photo = ImageTk.PhotoImage(pil_icon)
+                
+                self.icon_lbl = Label(self.content_frame, image=self.icon_photo, bg="#0d0d0d")
+                self.icon_lbl.pack(side="left", padx=(12, 0))
+            except Exception as e:
+                print(f"Icon load error: {e}")
+
+        text_pad = (6, 0) if self.icon_lbl else (12, 0)
+        self.title_lbl = Label(self.content_frame, text=title_text, bg="#0d0d0d", fg="#cccccc", font=("Segoe UI", 9, "bold"))
+        self.title_lbl.pack(side="left", padx=text_pad)
+
+        self.btn_close = TitleBarButton(self.content_frame, btn_type="close", hover_color="#E81123", 
+                                        command=lambda: close_cmd() if close_cmd else master.destroy())
+        self.btn_close.pack(side="right", fill="y")
+        
+        if not is_dialog:
+            self.btn_max = TitleBarButton(self.content_frame, btn_type="max", command=self.toggle_maximize)
+            self.btn_max.pack(side="right", fill="y")
+            
+            self.btn_min = TitleBarButton(self.content_frame, btn_type="min", command=self.minimize)
+            self.btn_min.pack(side="right", fill="y")
+
+        drag_widgets = [self, self.content_frame, self.title_lbl]
+        if self.icon_lbl: drag_widgets.append(self.icon_lbl)
+
+        for widget in drag_widgets:
+            widget.bind("<Button-1>", self.start_move)
+            widget.bind("<B1-Motion>", self.do_move)
+            if not is_dialog:
+                widget.bind("<Double-Button-1>", lambda e: self.toggle_maximize())
+
+    def start_move(self, event):
+        self._drag_data["x"] = event.x
+        self._drag_data["y"] = event.y
+
+    def do_move(self, event):
+        if self.master.state() == 'zoomed': return
+        dx = event.x - self._drag_data["x"]
+        dy = event.y - self._drag_data["y"]
+        x = self.master.winfo_x() + dx
+        y = self.master.winfo_y() + dy
+        self.master.geometry(f"+{x}+{y}")
+
+    def toggle_maximize(self):
+        if self.master.state() == 'zoomed':
+            self.master.state('normal')
+            self.btn_max.btn_type = "max"
+        else:
+            self.master.state('zoomed')
+            self.btn_max.btn_type = "restore"
+        self.btn_max.draw_icon()
+
+    def minimize(self):
+        hwnd = ctypes.windll.user32.GetParent(self.master.winfo_id())
+        if hwnd == 0: hwnd = self.master.winfo_id()
+        ctypes.windll.user32.ShowWindow(hwnd, 6)
+
+class Resizer(Frame):
+    def __init__(self, master, **kwargs):
+        super().__init__(master, bg="#0d0d0d", cursor="size_nw_se", width=16, height=16, **kwargs)
+        self.master = master
+        self.bind("<B1-Motion>", self.resize)
+        self._drag_data = {"x": 0, "y": 0}
+        
+        self.canvas = Canvas(self, bg="#0d0d0d", width=16, height=16, highlightthickness=0)
+        self.canvas.pack()
+        self.canvas.create_line(4, 12, 12, 4, fill="#444444", width=1)
+        self.canvas.create_line(8, 12, 12, 8, fill="#444444", width=1)
+        self.canvas.create_line(12, 12, 12, 12, fill="#444444", width=1)
+        
+        self.canvas.bind("<B1-Motion>", self.resize)
+
+    def resize(self, event):
+        xwin = self.master.winfo_x()
+        ywin = self.master.winfo_y()
+        start_x = event.x_root
+        start_y = event.y_root
+        
+        new_w = start_x - xwin
+        new_h = start_y - ywin
+        
+        if new_w > 400 and new_h > 300:
+            self.master.geometry(f"{new_w}x{new_h}")
+
+def set_appwindow(root):
+    hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+    if hwnd == 0:
+        hwnd = root.winfo_id()
+
+    GWL_EXSTYLE = -20
+    WS_EX_APPWINDOW = 0x00040000
+    WS_EX_TOOLWINDOW = 0x00000080
+    
+    ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    ex_style = ex_style & ~WS_EX_TOOLWINDOW
+    ex_style = ex_style | WS_EX_APPWINDOW
+    ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+
+    GWL_STYLE = -16
+    WS_SYSMENU = 0x00080000
+    WS_MINIMIZEBOX = 0x00020000
+    
+    style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+    style = style | WS_SYSMENU | WS_MINIMIZEBOX
+    ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+
+    root.wm_withdraw()
+    root.after(10, lambda: root.wm_deiconify())
 
 class GridTile:
     def __init__(self, path=None, img_obj=None):
         self.path = path if path else "clipboard_image"
+        
         if img_obj:
-            self.original = img_obj.convert("RGB")
+            pil_image = img_obj.convert("RGB")
+            self.original = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
         elif path and os.path.exists(path):
-            self.original = Image.open(path).convert("RGB")
+            with open(path, "rb") as f:
+                bytes_data = bytearray(f.read())
+                numpy_array = np.asarray(bytes_data, dtype=np.uint8)
+                self.original = cv2.imdecode(numpy_array, cv2.IMREAD_COLOR)
         else:
-            self.original = Image.new("RGB", (100, 100), "#333333")
+            self.original = np.zeros((100, 100, 3), dtype=np.uint8)
+
+        self.h, self.w = self.original.shape[:2]
+
+        self.proxy = self.original
+        scale = 2048 / max(self.h, self.w)
+        if scale < 1:
+            new_w, new_h = int(self.w * scale), int(self.h * scale)
+            self.proxy = cv2.resize(self.original, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+
         self.offset_x = 0
         self.offset_y = 0
         self.scale = 1.0
-        # Tracks the last rendered size to keep zoom position relative during layout changes
         self.last_render_w = 0 
         self.last_render_h = 0
         self.tk_ref = None
@@ -49,11 +250,12 @@ class GridTile:
         self.last_render_h = 0
 
 class ModernSlider(Canvas):
-    def __init__(self, master, from_=0, to=100, initial=25, command=None, release_command=None, **kwargs):
+    def __init__(self, master, from_=0, to=100, initial=25, brand_color=DEFAULT_BRAND, command=None, release_command=None, **kwargs):
         super().__init__(master, **kwargs)
         self.from_ = from_
         self.to = to
         self.value = initial
+        self.brand_color = brand_color
         self.command = command
         self.release_command = release_command
         self.configure(bg=BG, highlightthickness=0, height=30)
@@ -66,6 +268,10 @@ class ModernSlider(Canvas):
     def get(self): return self.value
     def set_value(self, val):
         self.value = max(self.from_, min(self.to, val))
+        self.draw()
+        
+    def set_brand_color(self, color):
+        self.brand_color = color
         self.draw()
 
     def val_to_x(self, val):
@@ -88,9 +294,9 @@ class ModernSlider(Canvas):
         cy = self.h // 2
         self.create_line(self.padding, cy, self.w - self.padding, cy, fill="#333333", width=4, capstyle="round")
         cx = self.val_to_x(self.value)
-        self.create_line(self.padding, cy, cx, cy, fill=BRAND, width=4, capstyle="round")
+        self.create_line(self.padding, cy, cx, cy, fill=self.brand_color, width=4, capstyle="round")
         r = 8
-        self.create_oval(cx - r, cy - r, cx + r, cy + r, fill=BRAND, outline=BG, width=2)
+        self.create_oval(cx - r, cy - r, cx + r, cy + r, fill=self.brand_color, outline=BG, width=2)
 
     def move_to_click(self, event):
         self.value = self.x_to_val(event.x)
@@ -105,34 +311,108 @@ class ModernSlider(Canvas):
     def release(self, event):
         if self.release_command: self.release_command()
 
-# --- MAIN APP ---
+class ModernToggle(Canvas):
+    def __init__(self, master, variable=None, brand_color=DEFAULT_BRAND, width=44, height=24, **kwargs):
+        super().__init__(master, width=width, height=height, bg=BG, highlightthickness=0, **kwargs)
+        self.variable = variable
+        self.brand_color = brand_color
+        self.width = width
+        self.height = height
+        self.bind("<Button-1>", self.toggle)
+        self.draw()
+
+    def set_brand_color(self, color):
+        self.brand_color = color
+        self.draw()
+
+    def toggle(self, event=None):
+        if self.variable:
+            new_val = 0 if self.variable.get() == 1 else 1
+            self.variable.set(new_val)
+            self.draw()
+
+    def draw(self):
+        self.delete("all")
+        on = self.variable.get() == 1 if self.variable else False
+        
+        bg_color = self.brand_color if on else "#333333"
+        
+        pad = 2
+        r = (self.height - 2*pad) // 2
+        
+        x_start = self.height // 2
+        x_end = self.width - (self.height // 2)
+        cy = self.height // 2
+        
+        self.create_line(x_start, cy, x_end, cy, width=self.height, capstyle="round", fill=bg_color)
+        
+        cx = self.width - r - pad if on else r + pad
+        thumb_r = r - 2
+        self.create_oval(cx - thumb_r, cy - thumb_r, cx + thumb_r, cy + thumb_r, fill="#ffffff", outline="")
+
 
 class Cropper:
     def __init__(self, root):
         self.root = root
+        
+        self.root.configure(bg="#0d0d0d") 
+        
         self.root.title(TITLE)
-        self.root.configure(bg=BG)
-        self.root.geometry("1400x850") 
-        self.root.minsize(950, 650)
+        
+        w_width, w_height = 1400, 850
+        s_width, s_height = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        x = int((s_width / 2) - (w_width / 2))
+        y = int((s_height / 2) - (w_height / 2))
+        self.root.geometry(f"{w_width}x{w_height}+{x}+{y}")
 
-        # Variables
+        self.settings = {
+            "brand_color": DEFAULT_BRAND,
+            "save_gap_bg": False,
+            "last_gap_bg": "#0d0d0d"
+        }
+        self.load_settings()
+        self.brand_color = self.settings["brand_color"]
+        
+        self.root.overrideredirect(True) 
+        
+        try:
+            base_path = os.path.dirname(os.path.abspath(__file__))
+        except NameError:
+            base_path = os.path.dirname(os.path.abspath(sys.argv[0]))
+        
+        self.icon_path = os.path.join(base_path, "icon.ico")
+        
+        self.title_bar = CustomTitleBar(
+            root, 
+            title_text=TITLE, 
+            brand_color=self.brand_color, 
+            close_cmd=self.on_close,
+            icon_path=self.icon_path
+        )
+        self.title_bar.pack(side="top", fill="x")
+        
+        self.resizer = Resizer(root)
+        self.resizer.place(relx=1.0, rely=1.0, x=-16, y=-16)
+        
+        self.root.after(10, lambda: set_appwindow(self.root))
+    
+
         self.preview_after_id = None
         self.original = None
-        self.processed_image = None # Cache for Single Mode effects
+        self.processed_image = None
         self.path = None
         self.displayed_photo = None
         self.displayed_size = (0, 0)
         
-        # Single Mode State
         self.single_scale = 1.0
         self.single_offset_x = 0
         self.single_offset_y = 0
-        self.base_scale = 1.0 # Scale to fit window initially
+        self.single_gap = IntVar(value=10)
         
         self.start = None
         self.rect = None
-        self.coords = None # Screen coords (x0, y0, x1, y1)
-        self.original_coords = None # Absolute pixel coords on original image
+        self.coords = None 
+        self.original_coords = None
         
         self.crop_action = None 
         self.crop_drag_start = None
@@ -141,7 +421,6 @@ class Cropper:
         self.mode = "free"
         self.buttons_shown = False
         self.current_mode = "free"
-        self.welcome_items = []
         
         self.mode_type = "single" 
         self.effect_mode = StringVar(value="none")
@@ -150,7 +429,10 @@ class Cropper:
         
         self.grid_cols = IntVar(value=2)
         self.grid_gap = IntVar(value=10)
-        self.grid_bg_var = StringVar(value="#0d0d0d") 
+        
+        initial_bg = self.settings["last_gap_bg"] if self.settings["save_gap_bg"] else "#0d0d0d"
+        self.grid_bg_var = StringVar(value=initial_bg)
+        
         self.banner_gap_enabled = IntVar(value=1) 
         self.grid_tiles = []
         self.active_tile_index = -1
@@ -162,7 +444,6 @@ class Cropper:
 
         self.load_assets()
 
-        # UI Setup
         top_bar = Frame(root, bg=BG, height=60)
         top_bar.pack(fill="x", pady=(PADDING, 0), padx=PADDING)
         top_bar.pack_propagate(False)
@@ -195,64 +476,101 @@ class Cropper:
         
         self.btn_blur = Button(self.single_controls, text="Blur", **control_btn_style, command=lambda: self.set_effect_type("blur"))
         self.btn_pixel = Button(self.single_controls, text="Pixelate", **control_btn_style, command=lambda: self.set_effect_type("pixelate"))
-        self.btn_full_img = Button(self.single_controls, text="Save Crop", **control_btn_style, command=self.toggle_full_image_mode)
         
         self.btn_blur.pack(side="left", padx=(0, 5))
-        self.btn_pixel.pack(side="left", padx=(0, 20))
-        self.btn_full_img.pack(side="left", padx=(0, 20))
+        self.btn_pixel.pack(side="left", padx=(0, 5))
 
-        # --- GRID CONTROLS ---
+        self.lbl_intensity = Label(self.single_controls, text="Intensity", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold"))
+        self.lbl_intensity.pack(side="left", padx=(10, 5))
+        
+        self.slider = ModernSlider(self.single_controls, from_=0, to=50, initial=25, width=100, brand_color=self.brand_color, command=self.on_slider_move, release_command=self.update_preview_delayed)
+        self.slider.pack(side="left", padx=(0, 5))
+        
+        self.lbl_val = Label(self.single_controls, text="25", bg=BG, fg="#666666", width=3, font=("Segoe UI", 10))
+        self.lbl_val.pack(side="left", padx=(0, 15))
+
+        self.lbl_banners_single = Label(self.single_controls, text="Banners:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold"))
+        self.lbl_banners_single.pack(side="left", padx=(5,5))
+        self.single_banner_btns = {}
+        
+        small_btn_style = control_btn_style.copy()
+        small_btn_style["padx"] = 5
+        
+        for side in ['left', 'top', 'bottom', 'right']:
+            btn = Button(self.single_controls, text=side.capitalize(), **small_btn_style, bg=BTN_BG, fg=TEXT_INACTIVE, width=6, 
+                         command=lambda s=side: self.toggle_banner(s))
+            btn.pack(side="left", padx=2)
+            self.single_banner_btns[side] = btn
+
+        self.lbl_gap_single = Label(self.single_controls, text="Gap:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold"))
+        self.lbl_gap_single.pack(side="left", padx=(15,5))
+        
+        self.single_slider_gap = ModernSlider(self.single_controls, from_=0, to=100, initial=10, width=80, brand_color=self.brand_color, command=self.update_single_gap)
+        self.single_slider_gap.pack(side="left", padx=(5, 5))
+
+        self.lbl_gap_single_val = Label(self.single_controls, text="10", bg=BG, fg="#666666", width=3, font=("Segoe UI", 10))
+        self.lbl_gap_single_val.pack(side="left", padx=(0, 15))
+        
+        self.lbl_bg_single_text = Label(self.single_controls, text="Background:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold"))
+        self.lbl_bg_single_text.pack(side="left", padx=(5, 5))
+        
+        self.bg_preview_single = Canvas(self.single_controls, width=22, height=22, bg=BG, highlightthickness=0, cursor="hand2")
+        self.bg_preview_single.pack(side="left", padx=(0, 5))
+        self.bg_preview_single.bind("<Button-1>", self.open_bg_picker)
+        
+        self.entry_bg_single = Entry(self.single_controls, textvariable=self.grid_bg_var, width=8, font=("Segoe UI", 10), 
+                              bg=BTN_BG, fg=TEXT_ACTIVE, insertbackground="white", relief="flat")
+        self.entry_bg_single.pack(side="left", ipady=4)
+        self.entry_bg_single.bind("<KeyRelease>", self.update_grid_bg)
+
+
         self.grid_controls = Frame(self.bottom_bar, bg=BG)
         
-        Label(self.grid_controls, text="Columns:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(0,5))
+        self.lbl_cols_text = Label(self.grid_controls, text="Columns:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold"))
         self.lbl_cols_val = Label(self.grid_controls, text="2", bg=BG, fg="#666666", width=2, font=("Segoe UI", 10))
-        self.lbl_cols_val.pack(side="left", padx=(0, 0))
-        self.slider_cols = ModernSlider(self.grid_controls, from_=1, to=5, initial=2, width=80, command=self.update_grid_cols)
-        self.slider_cols.pack(side="left", padx=(10, 15))
+        self.slider_cols = ModernSlider(self.grid_controls, from_=1, to=5, initial=2, width=80, brand_color=self.brand_color, command=self.update_grid_cols)
 
-        Label(self.grid_controls, text="Gap:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(0,5))
+        self.lbl_gap_text = Label(self.grid_controls, text="Gap:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold"))
         self.lbl_gap_val = Label(self.grid_controls, text="10", bg=BG, fg="#666666", width=2, font=("Segoe UI", 10))
-        self.lbl_gap_val.pack(side="left", padx=(0,0))
-        self.slider_gap = ModernSlider(self.grid_controls, from_=0, to=50, initial=10, width=80, command=self.update_grid_gap)
-        self.slider_gap.pack(side="left", padx=(10, 15))
+        self.slider_gap = ModernSlider(self.grid_controls, from_=0, to=50, initial=10, width=80, brand_color=self.brand_color, command=self.update_grid_gap)
 
-        # --- BACKGROUND COLOR CONTROLS ---
-        Label(self.grid_controls, text="Background:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(5, 5))
+        self.lbl_bg_grid_text = Label(self.grid_controls, text="Background:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold"))
         
-        self.bg_preview = Canvas(self.grid_controls, width=22, height=22, bg=BG, highlightthickness=0)
-        self.bg_preview.pack(side="left", padx=(0, 5))
-        self.draw_bg_preview()
+        self.bg_preview = Canvas(self.grid_controls, width=22, height=22, bg=BG, highlightthickness=0, cursor="hand2")
+        self.bg_preview.bind("<Button-1>", self.open_bg_picker)
         
         self.entry_bg = Entry(self.grid_controls, textvariable=self.grid_bg_var, width=8, font=("Segoe UI", 10), 
                               bg=BTN_BG, fg=TEXT_ACTIVE, insertbackground="white", relief="flat")
-        self.entry_bg.pack(side="left", ipady=4)
         self.entry_bg.bind("<KeyRelease>", self.update_grid_bg)
 
-        Label(self.grid_controls, text="Banners:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(15,5))
+        self.lbl_banners_text = Label(self.grid_controls, text="Banners:", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold"))
         self.banner_btns = {}
         
         for side in ['left', 'top', 'bottom', 'right']:
             btn = Button(self.grid_controls, text=side.capitalize(), **control_btn_style, bg=BTN_BG, fg=TEXT_INACTIVE, width=6, command=lambda s=side: self.toggle_banner(s))
-            btn.pack(side="left", padx=2)
             self.banner_btns[side] = btn
 
         self.btn_banner_gap = Button(self.grid_controls, text="Banner Gap", **control_btn_style, 
-                                     bg=BRAND, fg=TEXT_ACTIVE,
+                                     bg=self.brand_color, fg=TEXT_ACTIVE,
                                      command=self.toggle_banner_gap_state)
-        self.btn_banner_gap.pack(side="left", padx=(10, 0))
+        
+        self.refresh_grid_controls_layout()
 
-        self.slider_container = Frame(self.bottom_bar, bg=BG)
-        self.lbl_val = Label(self.slider_container, text="25", bg=BG, fg="#666666", width=3, font=("Segoe UI", 10))
-        self.lbl_val.pack(side="right", padx=(10, 0))
-        self.slider = ModernSlider(self.slider_container, from_=0, to=50, initial=25, command=self.on_slider_move, release_command=self.update_preview_delayed)
-        self.slider.pack(side="right", fill="x", expand=True)
-        self.lbl_intensity = Label(self.slider_container, text="Intensity", bg=BG, fg="#888888", font=("Segoe UI", 10, "bold"))
-        self.lbl_intensity.pack(side="right", padx=(0, 15))
+
+        self.bottom_right_area = Frame(self.bottom_bar, bg=BG)
+        self.bottom_right_area.pack(side="right")
+
+        self.btn_settings = Button(self.bottom_right_area, text="⚙", font=("Segoe UI", 16), bg=BG, fg="#666666", 
+                                   activebackground=BG, activeforeground="white", relief="flat", bd=0, 
+                                   command=self.open_settings_window)
+        self.btn_settings.pack(side="right", padx=(10, 0))
+
+        self.btn_full_img = Button(self.bottom_right_area, text="Save Crop", **control_btn_style, command=self.toggle_full_image_mode)
 
         self.apply_windows_dark_mode()
+        self.draw_bg_preview() 
         self.draw_welcome()
 
-        # Bindings
         self.canvas.bind("<ButtonPress-1>", self.handle_click)
         self.canvas.bind("<Double-Button-1>", self.handle_double_click)
         self.canvas.bind("<B1-Motion>", self.handle_drag)
@@ -270,17 +588,165 @@ class Cropper:
         self.root.bind("<Control-V>", self.paste_from_clipboard)
         self.canvas.drop_target_register(DND_FILES)
         self.canvas.dnd_bind('<<Drop>>', self.on_drop)
-        self.root.protocol("WM_DELETE_WINDOW", lambda: (root.quit(), root.destroy(), os._exit(0)))
+        self.root.protocol("WM_DELETE_WINDOW", lambda: self.on_close())
 
+    def on_close(self):
+        if self.settings["save_gap_bg"]:
+            self.settings["last_gap_bg"] = self.grid_bg_var.get()
+            self.save_settings()
+        self.root.destroy()
+        sys.exit(0)
+
+    def load_settings(self):
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, "r") as f:
+                    data = json.load(f)
+                    self.settings.update(data)
+            except: pass
+
+    def save_settings(self):
+        try:
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump(self.settings, f, indent=4)
+        except: pass
+
+    def open_settings_window(self):
+        win = Toplevel(self.root)
+        win.title("Settings")
+        win.geometry("400x240") 
+        win.configure(bg=BG)
+        win.resizable(False, False)
+        
+        win.overrideredirect(True)
+        
+        root_x = self.root.winfo_x()
+        root_y = self.root.winfo_y()
+        root_w = self.root.winfo_width()
+        root_h = self.root.winfo_height()
+        x = root_x + (root_w // 2) - 200
+        y = root_y + (root_h // 2) - 120
+        win.geometry(f"400x240+{x}+{y}")
+
+        container = Frame(win, bg=BG, highlightthickness=1, highlightbackground="#333333")
+        container.pack(fill="both", expand=True)
+
+        tb = CustomTitleBar(win, title_text="Settings", brand_color=self.brand_color, 
+                            close_cmd=win.destroy, is_dialog=True)
+        tb.pack(in_=container, side="top", fill="x")
+
+        content = Frame(container, bg=BG)
+        content.pack(fill="both", expand=True, padx=20)
+
+
+        f_brand = Frame(content, bg=BG)
+        f_brand.pack(fill="x", pady=(20, 10)) 
+        Label(f_brand, text="Brand Color:", bg=BG, fg="#aaaaaa", font=("Segoe UI", 11)).pack(side="left")
+        
+        sv_brand = StringVar(value=self.settings["brand_color"])
+        entry_brand = Entry(f_brand, textvariable=sv_brand, bg=BTN_BG, fg="white", font=("Segoe UI", 11), width=10, relief="flat")
+        entry_brand.pack(side="right")
+        
+        preview_canv = Canvas(f_brand, width=26, height=26, bg=self.settings["brand_color"], highlightthickness=0, cursor="hand2")
+        preview_canv.pack(side="right", padx=(0, 10))
+        preview_canv.create_rectangle(0,0,25,25, outline="#555555", width=1)
+
+        def open_picker(event=None):
+            try:
+                init_c = sv_brand.get()
+                if len(init_c) != 7 or not init_c.startswith("#"): init_c = self.brand_color
+                color = colorchooser.askcolor(color=init_c, title="Select Brand Color", parent=win)
+                if color and color[1]: sv_brand.set(color[1])
+            except: pass
+
+        preview_canv.bind("<Button-1>", open_picker)
+        
+        def on_entry_change(*args):
+            c = sv_brand.get()
+            if len(c) == 7 and c.startswith("#"):
+                try: preview_canv.config(bg=c)
+                except: pass
+        sv_brand.trace("w", on_entry_change)
+
+        f_toggle = Frame(content, bg=BG)
+        f_toggle.pack(fill="x", pady=10)
+        Label(f_toggle, text="Save Gap Background Color", bg=BG, fg="#aaaaaa", font=("Segoe UI", 11)).pack(side="left")
+        iv_save_gap = IntVar(value=1 if self.settings["save_gap_bg"] else 0)
+        toggle = ModernToggle(f_toggle, variable=iv_save_gap, brand_color=self.brand_color)
+        toggle.pack(side="right")
+
+        lbl_link = Label(content, text="github.com/kekkodance/cropper", 
+                         bg=BG, fg="#555555", font=("Segoe UI", 8), cursor="hand2")
+        lbl_link.pack(side="bottom", pady=(0, 15))
+        
+        lbl_link.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/kekkodance/cropper"))
+        lbl_link.bind("<Enter>", lambda e: lbl_link.config(fg="#888888"))
+        lbl_link.bind("<Leave>", lambda e: lbl_link.config(fg="#555555"))
+
+        f_btns = Frame(content, bg=BG)
+        f_btns.pack(side="bottom", fill="x", pady=(10, 5))
+        
+        def save_and_close():
+            new_color = sv_brand.get()
+            valid = True
+            if len(new_color) != 7 or not new_color.startswith("#"): valid = False
+            else:
+                try: win.winfo_rgb(new_color)
+                except: valid = False
+            
+            if not valid:
+                messagebox.showerror("Error", "Invalid Hex Color code.", parent=win)
+                return
+
+            self.settings["brand_color"] = new_color
+            self.settings["save_gap_bg"] = bool(iv_save_gap.get())
+            if self.settings["save_gap_bg"]: self.settings["last_gap_bg"] = self.grid_bg_var.get()
+            self.save_settings()
+            self.brand_color = new_color
+            self.refresh_ui_colors()
+            win.destroy()
+
+        Button(f_btns, text="Save", bg=self.brand_color, fg="white", relief="flat", padx=20, pady=5, font=("Segoe UI", 10, "bold"), command=save_and_close).pack(side="right")
+        Button(f_btns, text="Cancel", bg=BTN_BG, fg="#aaaaaa", relief="flat", padx=20, pady=5, font=("Segoe UI", 10), command=win.destroy).pack(side="right", padx=10)
+
+    def refresh_ui_colors(self):
+        self.slider.set_brand_color(self.brand_color)
+        self.single_slider_gap.set_brand_color(self.brand_color)
+        self.slider_cols.set_brand_color(self.brand_color)
+        self.slider_gap.set_brand_color(self.brand_color)
+        
+        for mode, btn in self.btns.items():
+            if mode == self.mode: btn.config(bg=self.brand_color)
+        
+        mode = self.effect_mode.get()
+        if mode == "blur": self.btn_blur.config(bg=self.brand_color)
+        if mode == "pixelate": self.btn_pixel.config(bg=self.brand_color)
+        if self.effect_enabled.get() == 1: self.btn_full_img.config(bg=self.brand_color)
+        
+        for side, active in self.banners_active.items():
+            if active: 
+                self.banner_btns[side].config(bg=self.brand_color)
+                self.single_banner_btns[side].config(bg=self.brand_color)
+            
+        if self.banner_gap_enabled.get() == 1: self.btn_banner_gap.config(bg=self.brand_color)
+        self.status_label.config(fg=self.brand_color)
+        if self.mode_type == "single" and self.rect: self.draw_crop_rect()
+        elif not self.original and not self.grid_tiles: self.draw_welcome()
+
+        
     def load_assets(self):
-        icon_path = "icon.ico"
-        png_path = "icon.png"
-        if getattr(sys, 'frozen', False):
-            icon_path = os.path.join(sys._MEIPASS, "icon.ico")
-            png_path = os.path.join(sys._MEIPASS, "icon.png")
+        try:
+            base_path = os.path.dirname(os.path.abspath(__file__))
+        except NameError:
+            base_path = os.path.dirname(os.path.abspath(sys.argv[0]))
+
+        icon_path = os.path.join(base_path, "icon.ico")
+        png_path = os.path.join(base_path, "icon.png")
+
         if os.path.exists(icon_path):
             try: self.root.iconbitmap(icon_path)
             except: pass
+            
         self.welcome_icon_photo = None
         if os.path.exists(png_path):
             try:
@@ -289,40 +755,65 @@ class Cropper:
                 self.welcome_icon_photo = ImageTk.PhotoImage(img)
             except: pass
 
+  
+
     def apply_windows_dark_mode(self):
         try:
             self.root.update()
-            set_window_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
-            get_parent = ctypes.windll.user32.GetParent
-            hwnd = get_parent(self.root.winfo_id())
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
             value = ctypes.c_int(2)
-            set_window_attribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
         except: pass
 
     def toggle_banner(self, side):
         self.banners_active[side] = not self.banners_active[side]
-        btn = self.banner_btns[side]
         is_active = self.banners_active[side]
-        btn.config(bg=BRAND if is_active else BTN_BG, fg=TEXT_ACTIVE if is_active else TEXT_INACTIVE)
-        self.display_grid()
+        
+        color = self.brand_color if is_active else BTN_BG
+        fg = TEXT_ACTIVE if is_active else TEXT_INACTIVE
+        
+        self.banner_btns[side].config(bg=color, fg=fg)
+        self.single_banner_btns[side].config(bg=color, fg=fg)
+        
+        self.update_bottom_ui_state()
+        
+        if self.mode_type == "single":
+            self.display()
+        else:
+            self.display_grid()
 
     def toggle_banner_gap_state(self):
         new_state = 1 - self.banner_gap_enabled.get()
         self.banner_gap_enabled.set(new_state)
-        if new_state == 1:
-            self.btn_banner_gap.config(bg=BRAND, fg=TEXT_ACTIVE)
-        else:
-            self.btn_banner_gap.config(bg=BTN_BG, fg=TEXT_INACTIVE)
+        if new_state == 1: self.btn_banner_gap.config(bg=self.brand_color, fg=TEXT_ACTIVE)
+        else: self.btn_banner_gap.config(bg=BTN_BG, fg=TEXT_INACTIVE)
         self.display_grid()
 
-    # --- BG Color Logic ---
+    def update_single_gap(self, val):
+        self.single_gap.set(int(val))
+        self.lbl_gap_single_val.config(text=str(int(val)))
+        if self.mode_type == "single": self.display()
+
     def draw_bg_preview(self):
         self.bg_preview.delete("all")
+        self.bg_preview_single.delete("all")
         color = self.grid_bg_var.get()
-        try:
+        try: 
             self.bg_preview.create_oval(2, 2, 20, 20, fill=color, outline="#555555", width=1)
-        except:
+            self.bg_preview_single.create_oval(2, 2, 20, 20, fill=color, outline="#555555", width=1)
+        except: 
             self.bg_preview.create_oval(2, 2, 20, 20, fill=BG, outline="red", width=1)
+            self.bg_preview_single.create_oval(2, 2, 20, 20, fill=BG, outline="red", width=1)
+
+    def open_bg_picker(self, event=None):
+        try:
+            init_c = self.grid_bg_var.get()
+            if len(init_c) != 7 or not init_c.startswith("#"): init_c = "#0d0d0d"
+            color = colorchooser.askcolor(color=init_c, title="Select Background Color", parent=self.root)
+            if color and color[1]:
+                self.grid_bg_var.set(color[1])
+                self.update_grid_bg()
+        except: pass
 
     def update_grid_bg(self, event=None):
         val = self.grid_bg_var.get()
@@ -330,21 +821,175 @@ class Cropper:
             try:
                 self.root.winfo_rgb(val)
                 self.draw_bg_preview()
-                self.display_grid()
+                if self.mode_type == "grid": self.display_grid()
+                else: self.display()
+                if self.settings["save_gap_bg"]:
+                    self.settings["last_gap_bg"] = val
+                    self.save_settings()
             except: pass
 
-    # --- LAYOUT SOLVER ---
+    def refresh_single_controls_layout(self):
+        for widget in self.single_controls.winfo_children():
+            widget.pack_forget()
+
+        self.btn_blur.pack(side="left", padx=(0, 5))
+        self.btn_pixel.pack(side="left", padx=(0, 5))
+
+        self.lbl_intensity.pack(side="left", padx=(10, 5))
+        self.slider.pack(side="left", padx=(0, 5))
+        
+        if not self.is_compact:
+            self.lbl_val.pack(side="left", padx=(0, 15))
+
+        self.lbl_banners_single.pack(side="left", padx=(5,5))
+        for side in ['left', 'top', 'bottom', 'right']:
+            self.single_banner_btns[side].pack(side="left", padx=2)
+
+        self.lbl_gap_single.pack(side="left", padx=(15,5))
+        self.single_slider_gap.pack(side="left", padx=(5, 5))
+        
+        if not self.is_compact:
+            self.lbl_gap_single_val.pack(side="left", padx=(0, 15))
+        
+        if not self.is_compact:
+            self.lbl_bg_single_text.pack(side="left", padx=(5, 5))
+        
+        self.bg_preview_single.pack(side="left", padx=(0, 5))
+        
+        if not self.is_compact:
+            self.entry_bg_single.pack(side="left", ipady=4)
+
+    def refresh_grid_controls_layout(self):
+        for widget in self.grid_controls.winfo_children():
+            widget.pack_forget()
+
+        self.lbl_cols_text.pack(side="left", padx=(0,5))
+        self.lbl_cols_val.pack(side="left")
+        self.slider_cols.pack(side="left", padx=(10, 15))
+
+        self.lbl_gap_text.pack(side="left", padx=(0,5))
+        self.lbl_gap_val.pack(side="left")
+        self.slider_gap.pack(side="left", padx=(10, 15))
+
+        self.lbl_bg_grid_text.config(text="BG:" if self.is_compact else "Background:")
+        self.lbl_bg_grid_text.pack(side="left", padx=(5, 5))
+        
+        self.bg_preview.pack(side="left", padx=(0, 5))
+        
+        if not self.is_compact:
+            self.entry_bg.pack(side="left", ipady=4)
+
+        self.lbl_banners_text.pack(side="left", padx=(15,5))
+        for side in ['left', 'top', 'bottom', 'right']:
+            self.banner_btns[side].pack(side="left", padx=2)
+            
+        self.btn_banner_gap.pack(side="left", padx=(10, 0))
+
+    def get_single_layout_metrics(self, container_w, container_h, is_save=False):
+        if self.original is None: return {'banners': {}, 'center': {'x':0, 'y':0, 'w':100, 'h':100}}
+
+        H0, W0 = self.original.shape[:2]
+        
+        gap = self.single_gap.get() if not is_save else int(self.single_gap.get() * (container_w / 1000.0 if is_save else 1)) 
+
+        def get_banner_dim(side, adj_dim):
+            img = self.banner_images[side]
+            if img and img.original is not None:
+                w, h = img.w, img.h
+                ratio = h / w if side in ['top', 'bottom'] else w / h
+                return adj_dim * ratio
+            return adj_dim * DEFAULT_BANNER_THICKNESS_RATIO
+
+        R_t = 0; R_b = 0; R_l = 0; R_r = 0
+        
+        if self.banners_active['top']:
+            img = self.banner_images['top']
+            if img and img.original is not None: R_t = img.h / img.w
+            else: R_t = DEFAULT_BANNER_THICKNESS_RATIO
+            
+        if self.banners_active['bottom']:
+            img = self.banner_images['bottom']
+            if img and img.original is not None: R_b = img.h / img.w
+            else: R_b = DEFAULT_BANNER_THICKNESS_RATIO
+
+        if self.banners_active['left']:
+            img = self.banner_images['left']
+            if img and img.original is not None: R_l = img.w / img.h
+            else: R_l = DEFAULT_BANNER_THICKNESS_RATIO
+            
+        if self.banners_active['right']:
+            img = self.banner_images['right']
+            if img and img.original is not None: R_r = img.w / img.h
+            else: R_r = DEFAULT_BANNER_THICKNESS_RATIO
+
+        gap_cnt_x = (1 if self.banners_active['left'] else 0) + (1 if self.banners_active['right'] else 0)
+        gap_total_x = gap_cnt_x * gap
+        
+        gap_cnt_y = (1 if self.banners_active['top'] else 0) + (1 if self.banners_active['bottom'] else 0)
+        gap_total_y = gap_cnt_y * gap
+        
+        term_w = W0 + H0 * (R_l + R_r)
+        term_h = H0 + W0 * (R_t + R_b)
+        
+        avail_w = container_w - gap_total_x
+        avail_h = container_h - gap_total_y
+        
+        if avail_w <= 0 or avail_h <= 0: return {'banners': {}, 'center': {'x':0,'y':0,'w':1,'h':1}}
+
+        s_w = avail_w / term_w
+        s_h = avail_h / term_h
+        s = min(s_w, s_h)
+        
+        main_w = int(s * W0)
+        main_h = int(s * H0)
+        
+        w_l = int(main_h * R_l)
+        w_r = int(main_h * R_r)
+        h_t = int(main_w * R_t)
+        h_b = int(main_w * R_b)
+        
+        total_w = main_w + w_l + w_r + gap_total_x
+        total_h = main_h + h_t + h_b + gap_total_y
+        
+        start_x = (container_w - total_w) // 2
+        start_y = (container_h - total_h) // 2
+        
+        metrics = {'banners': {}, 'center': {}}
+        
+        curr_y = start_y
+        if self.banners_active['top']:
+            top_x = start_x + w_l + (gap if self.banners_active['left'] else 0)
+            metrics['banners']['top'] = {'x': top_x, 'y': curr_y, 'w': main_w, 'h': h_t}
+            curr_y += h_t + gap
+            
+        center_y = curr_y
+        
+        curr_x = start_x
+        if self.banners_active['left']:
+            metrics['banners']['left'] = {'x': curr_x, 'y': center_y, 'w': w_l, 'h': main_h}
+            curr_x += w_l + gap
+            
+        metrics['center'] = {'x': curr_x, 'y': center_y, 'w': main_w, 'h': main_h}
+        
+        if self.banners_active['right']:
+            right_x = curr_x + main_w + gap
+            metrics['banners']['right'] = {'x': right_x, 'y': center_y, 'w': w_r, 'h': main_h}
+            
+        if self.banners_active['bottom']:
+            bot_x = start_x + w_l + (gap if self.banners_active['left'] else 0)
+            bot_y = center_y + main_h + gap
+            metrics['banners']['bottom'] = {'x': bot_x, 'y': bot_y, 'w': main_w, 'h': h_b}
+
+        return metrics
+
     def get_layout_metrics(self, container_w, container_h, is_save=False):
-        # Calculate gaps
         gap = self.grid_gap.get() if not is_save else int(self.grid_gap.get() * (container_w/1000))
-        # Logic: If banner gap enabled, use 'gap', else 0
         b_gap = gap if self.banner_gap_enabled.get() == 1 else 0
 
-        # Ratios
         def get_ratio(side, is_vertical_banner):
             img = self.banner_images[side]
-            if img and img.original:
-                w, h = img.original.width, img.original.height
+            if img and img.original is not None:
+                w, h = img.w, img.h
                 if is_vertical_banner: return w / h
                 else: return h / w
             return DEFAULT_BANNER_THICKNESS_RATIO
@@ -354,7 +999,6 @@ class Cropper:
         r_t = get_ratio('top', False) if self.banners_active['top'] else 0
         r_b = get_ratio('bottom', False) if self.banners_active['bottom'] else 0
 
-        # Banner gaps use b_gap
         gap_w_total = (b_gap if self.banners_active['left'] else 0) + (b_gap if self.banners_active['right'] else 0)
         gap_h_total = (b_gap if self.banners_active['top'] else 0) + (b_gap if self.banners_active['bottom'] else 0)
 
@@ -363,7 +1007,6 @@ class Cropper:
         
         if avail_w <= 0 or avail_h <= 0: return {'grid':{'x':0,'y':0,'w':1,'h':1}, 'banners':{}}
 
-        # Added 3:4 (0.75) to targets
         targets = {"1:1":1.0, "4:3":1.333, "3:4":0.75, "16:9":1.777, "9:16":0.5625}
         grid_ar = targets.get(self.mode, None)
 
@@ -373,19 +1016,16 @@ class Cropper:
             h_grid = min(h_based_on_w, h_based_on_h)
             w_grid = h_grid * grid_ar
         else:
-            sum_x = r_l + r_r
-            sum_y = r_t + r_b
+            sum_x = r_l + r_r; sum_y = r_t + r_b
             denom = 1 - (sum_x * sum_y)
             if abs(denom) < 0.001:
-                w_grid = avail_w / (1 + sum_x)
-                h_grid = avail_h / (1 + sum_y)
+                w_grid = avail_w / (1 + sum_x); h_grid = avail_h / (1 + sum_y)
             else:
                 h_grid = (avail_h - avail_w * sum_y) / denom
                 w_grid = avail_w - h_grid * sum_x
                 
             if h_grid <= 0 or w_grid <= 0:
-                 h_grid = avail_h / (1 + sum_y)
-                 w_grid = avail_w / (1 + sum_x)
+                 h_grid = avail_h / (1 + sum_y); w_grid = avail_w / (1 + sum_x)
 
         w_grid = int(w_grid); h_grid = int(h_grid)
         w_left = int(h_grid * r_l); w_right = int(h_grid * r_r)
@@ -401,55 +1041,72 @@ class Cropper:
         
         if self.banners_active['top']:
             metrics['banners']['top'] = {'x': start_x + (w_left + (b_gap if self.banners_active['left'] else 0)), 
-                                         'y': start_y, 
-                                         'w': w_grid, 'h': h_top}
+                                         'y': start_y, 'w': w_grid, 'h': h_top}
         
         grid_y = start_y + h_top + (b_gap if self.banners_active['top'] else 0)
         
         if self.banners_active['left']:
-            metrics['banners']['left'] = {'x': start_x, 
-                                          'y': grid_y, 
-                                          'w': w_left, 'h': h_grid}
-                                          
+            metrics['banners']['left'] = {'x': start_x, 'y': grid_y, 'w': w_left, 'h': h_grid}
+                                             
         grid_x = start_x + w_left + (b_gap if self.banners_active['left'] else 0)
         
         metrics['grid'] = {'x': grid_x, 'y': grid_y, 'w': w_grid, 'h': h_grid}
         
         if self.banners_active['right']:
-            metrics['banners']['right'] = {'x': grid_x + w_grid + b_gap, 
-                                           'y': grid_y, 
-                                           'w': w_right, 'h': h_grid}
+            metrics['banners']['right'] = {'x': grid_x + w_grid + b_gap, 'y': grid_y, 'w': w_right, 'h': h_grid}
         
         if self.banners_active['bottom']:
-            metrics['banners']['bottom'] = {'x': grid_x, 
-                                            'y': grid_y + h_grid + b_gap, 
-                                            'w': w_grid, 'h': h_bot}
-                                            
+            metrics['banners']['bottom'] = {'x': grid_x, 'y': grid_y + h_grid + b_gap, 'w': w_grid, 'h': h_bot}
+                                             
         return metrics
+
+    def cv2_to_imagetk(self, cv_img):
+        rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+        return ImageTk.PhotoImage(image=Image.fromarray(rgb))
 
     def on_drop(self, e):
         try: files = self.root.tk.splitlist(e.data)
         except: files = e.data.split()
         files = [f for f in files if os.path.isfile(f)]
         if not files: return
+        
+        mx = e.x_root - self.canvas.winfo_rootx()
+        my = e.y_root - self.canvas.winfo_rooty()
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
 
+        banner_metrics = None
         if self.mode_type == "grid":
-            mx = e.x_root - self.canvas.winfo_rootx()
-            my = e.y_root - self.canvas.winfo_rooty()
-            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-            metrics = self.get_layout_metrics(cw, ch)
-            dropped = False
-            for side, rect in metrics['banners'].items():
+             m = self.get_layout_metrics(cw, ch)
+             banner_metrics = m['banners']
+        else:
+             m = self.get_single_layout_metrics(cw, ch)
+             banner_metrics = m['banners']
+
+        dropped_on_banner = False
+        if banner_metrics:
+            for side, rect in banner_metrics.items():
                 if rect['x'] <= mx <= rect['x']+rect['w'] and rect['y'] <= my <= rect['y']+rect['h']:
                     self.banner_images[side] = GridTile(path=files[0])
-                    dropped = True; break
-            if dropped: self.display_grid(); return
+                    dropped_on_banner = True
+                    break
+        
+        if dropped_on_banner:
+            if self.mode_type == "grid": self.display_grid()
+            else: self.display()
+            return
+
+        if self.mode_type == "grid":
             self.grid_tiles.extend([GridTile(path=f) for f in files])
-            self.update_window_title() # Update Title
+            self.update_window_title()
             self.show_status(f"Added {len(files)} images to grid")
             self.display_grid()
+        
+        elif self.original is not None:
+            self.ask_replace_or_collage(files)
+            
         elif len(files) > 1:
             self.set_ui_mode("grid"); self.setup_grid(files)
+            
         else:
             self.set_ui_mode("single"); self.load(files[0])
 
@@ -474,23 +1131,122 @@ class Cropper:
                 self.update_window_title()
                 self.display_grid()
             else: self.set_ui_mode("single"); self.load_image_object(img)
+    
+    def ask_replace_or_collage(self, files_list):
+        dialog = Toplevel(self.root)
+        dialog.title("Action")
+        dialog.geometry("350x180")
+        dialog.configure(bg=BG)
+        dialog.resizable(False, False)
+        
+        dialog.withdraw()
+        
+        dialog.overrideredirect(True)
+        
+        dialog.attributes("-topmost", True)
+
+        
+        container = Frame(dialog, bg=BG, highlightthickness=1, highlightbackground="#333333")
+        container.pack(fill="both", expand=True)
+
+        tb = CustomTitleBar(dialog, title_text="Action", brand_color=self.brand_color, 
+                            close_cmd=dialog.destroy, is_dialog=True)
+        tb.pack(in_=container, side="top", fill="x")
+
+        content = Frame(container, bg=BG)
+        content.pack(fill="both", expand=True, padx=20)
+
+        Label(content, text="Add to Grid or Replace?", bg=BG, fg="white", 
+              font=("Segoe UI", 12, "bold")).pack(pady=(15, 5))
+        Label(content, text="You already have an image open.", bg=BG, fg="#888888", 
+              font=("Segoe UI", 10)).pack(pady=(0, 20))
+
+        btn_frame = Frame(content, bg=BG)
+        btn_frame.pack(fill="x", pady=(0, 20))
+
+        def do_replace():
+            dialog.destroy()
+            if len(files_list) > 1:
+                self.set_ui_mode("grid")
+                self.setup_grid(files_list)
+            else:
+                self.load(files_list[0])
+
+        def do_collage():
+            dialog.destroy()
+            self.convert_to_collage(files_list)
+
+        Button(btn_frame, text="Replace", bg=BTN_BG, fg="white", relief="flat", 
+               font=("Segoe UI", 10), padx=15, pady=6, command=do_replace).pack(side="left", expand=True)
+               
+        Button(btn_frame, text="Create Collage", bg=self.brand_color, fg="white", relief="flat", 
+               font=("Segoe UI", 10, "bold"), padx=15, pady=6, command=do_collage).pack(side="right", expand=True)
+
+        
+        dialog.update_idletasks() 
+
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 175
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 90
+        dialog.geometry(f"+{x}+{y}")
+        
+        dialog.deiconify()
+        dialog.lift()
+        
+        dialog.focus_force() 
+        
+        dialog.after(10, dialog.grab_set) 
+        
+        self.root.wait_window(dialog)
+
+    def convert_to_collage(self, new_files_list):
+        current_path = self.path if self.path else "clipboard_img"
+        
+        if self.original is not None:
+            rgb = cv2.cvtColor(self.original, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb)
+            base_tile = GridTile(path=current_path, img_obj=pil_img)
+        else:
+            base_tile = GridTile(path=current_path)
+        
+        self.grid_tiles = [base_tile]
+        
+        self.grid_tiles.extend([GridTile(path=p) for p in new_files_list])
+        
+        self.original = None
+        self.processed_image = None
+        self.rect = None
+        self.coords = None
+        
+        self.set_ui_mode("grid")
+        self.show_toolbar()
+        
+        count = len(self.grid_tiles)
+        cols = 2 if count < 5 else 3
+        self.slider_cols.set_value(cols)
+        self.grid_cols.set(cols)
+        self.lbl_cols_val.config(text=str(cols))
+        
+        self.update_window_title()
+        self.show_status("Mode switched to Grid")
+        self.display_grid()
 
     def update_window_title(self):
         if self.mode_type == "grid":
             count = len(self.grid_tiles)
-            self.root.title(f"{TITLE} - {count} Image{'s' if count != 1 else ''}")
+            txt = f"{TITLE} - {count} Image{'s' if count != 1 else ''}"
         elif self.path:
-            self.root.title(f"{TITLE} - {Path(self.path).name}")
+            txt = f"{TITLE} - {Path(self.path).name}"
         else:
-            self.root.title(TITLE)
+            txt = TITLE
+            
+        self.title_bar.title_lbl.config(text=txt)
+        self.root.title(txt)
 
-    # --- INPUT HANDLING ---
 
     def handle_click(self, e):
         if self.mode_type == "single":
-            if not self.original: return
+            if self.original is None: return
             
-            # Check for resize handles if rect exists
             handle = self.get_handle_at(e.x, e.y)
             if handle:
                 self.crop_action = handle
@@ -498,21 +1254,19 @@ class Cropper:
                 self.crop_start_coords = self.coords
                 return
 
-            # Check if clicking inside rect to move
             if self.rect and self.is_inside_rect(e.x, e.y):
                 self.crop_action = "move"
                 self.crop_drag_start = (e.x, e.y)
                 self.crop_start_coords = self.coords
                 return
 
-            # Otherwise, start new crop
             if self.rect:
                 self.canvas.delete(self.rect)
                 self.canvas.delete("handle")
                 self.rect = None
                 self.original_coords = None
-                self.processed_image = None # Clear cache
-                self.update_preview() # Force update to clear effect
+                self.processed_image = None 
+                self.update_preview()
             
             self.start = (e.x, e.y)
             self.crop_action = "create"
@@ -549,15 +1303,10 @@ class Cropper:
 
     def handle_drag(self, e):
         if self.mode_type == "single":
-            if not self.original: return
-            
-            if self.crop_action == "create":
-                self.drag_crop_create(e)
-            elif self.crop_action == "move":
-                self.drag_crop_move(e)
-            elif self.crop_action in ["n", "s", "e", "w", "nw", "ne", "sw", "se"]:
-                self.drag_crop_resize(e)
-                
+            if self.original is None: return
+            if self.crop_action == "create": self.drag_crop_create(e)
+            elif self.crop_action == "move": self.drag_crop_move(e)
+            elif self.crop_action in ["n", "s", "e", "w", "nw", "ne", "sw", "se"]: self.drag_crop_resize(e)     
         elif self.active_tile_index != -1 and self.drag_start_pos:
             dx = e.x - self.drag_start_pos[0]; dy = e.y - self.drag_start_pos[1]
             t = self.grid_tiles[self.active_tile_index]
@@ -595,14 +1344,9 @@ class Cropper:
             if not self.drag_start_pos: return
             dx = e.x - self.drag_start_pos[0]
             dy = e.y - self.drag_start_pos[1]
-            
-            # Pan logic for single mode
             self.single_offset_x += dx
             self.single_offset_y += dy
-            
-            # Constraint logic for single mode (keep image visible)
             self.apply_single_pan_constraint()
-            
             self.drag_start_pos = (e.x, e.y)
             self.update_preview()
 
@@ -638,7 +1382,6 @@ class Cropper:
             self.apply_single_pan_constraint()
             self.update_preview()
 
-    # --- SINGLE MODE CROP LOGIC ---
 
     def drag_crop_create(self, e):
         x0, y0 = self.start
@@ -656,12 +1399,10 @@ class Cropper:
     def drag_crop_resize(self, e):
         x0, y0, x1, y1 = self.crop_start_coords
         handle = self.crop_action
-        
         if "w" in handle: x0 = e.x
         if "e" in handle: x1 = e.x
         if "n" in handle: y0 = e.y
         if "s" in handle: y1 = e.y
-        
         nx0, nx1 = min(x0, x1), max(x0, x1)
         ny0, ny1 = min(y0, y1), max(y0, y1)
         
@@ -701,7 +1442,7 @@ class Cropper:
         self.canvas.delete("handle")
         if not self.coords: return
         
-        self.rect = self.canvas.create_rectangle(*self.coords, outline=BRAND, width=2)
+        self.rect = self.canvas.create_rectangle(*self.coords, outline=self.brand_color, width=2)
         
         x0, y0, x1, y1 = self.coords
         xm, ym = (x0+x1)//2, (y0+y1)//2
@@ -716,26 +1457,21 @@ class Cropper:
 
         r = HANDLE_SIZE // 2
         for hx, hy, tag in handles:
-            self.canvas.create_rectangle(hx-r, hy-r, hx+r, hy+r, fill=BRAND, outline=BG, tags=("handle", tag))
+            self.canvas.create_rectangle(hx-r, hy-r, hx+r, hy+r, fill=self.brand_color, outline=BG, tags=("handle", tag))
 
     def get_handle_at(self, x, y):
         if not self.coords: return None
         x0, y0, x1, y1 = self.coords
         xm, ym = (x0+x1)//2, (y0+y1)//2
-        
         targets = [
             (x0, y0, "nw"), (xm, y0, "n"), (x1, y0, "ne"),
             (x1, ym, "e"), (x1, y1, "se"), (xm, y1, "s"),
             (x0, y1, "sw"), (x0, ym, "w")
         ]
-        
-        if self.mode != "free":
-            targets = [t for t in targets if len(t[2]) == 2]
-            
+        if self.mode != "free": targets = [t for t in targets if len(t[2]) == 2]
         r = HANDLE_SIZE 
         for hx, hy, name in targets:
-            if hx-r <= x <= hx+r and hy-r <= y <= hy+r:
-                return name
+            if hx-r <= x <= hx+r and hy-r <= y <= hy+r: return name
         return None
 
     def is_inside_rect(self, x, y):
@@ -747,14 +1483,18 @@ class Cropper:
         if not self.coords: 
             self.start = None
             return
-            
+
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        metrics = self.get_single_layout_metrics(cw, ch)
+        c_x, c_y, c_w, c_h = metrics['center']['x'], metrics['center']['y'], metrics['center']['w'], metrics['center']['h']
+        
         disp_w, disp_h = self.displayed_size
         
-        img_x = (cw - disp_w) // 2 + self.single_offset_x
-        img_y = (ch - disp_h) // 2 + self.single_offset_y
+        img_x = c_x + (c_w - disp_w) // 2 + self.single_offset_x
+        img_y = c_y + (c_h - disp_h) // 2 + self.single_offset_y
         
-        scale = disp_w / self.original.width
+        h, w = self.original.shape[:2]
+        scale = disp_w / w
         
         cx0, cy0, cx1, cy1 = self.coords
         
@@ -769,41 +1509,40 @@ class Cropper:
         self.show_status("Press ENTER to save")
         self.start = None
 
-    # --- SINGLE MODE PANNING CONSTRAINT ---
     def apply_single_pan_constraint(self):
-        render_w, render_h = self.displayed_size
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        metrics = self.get_single_layout_metrics(cw, ch)
+        c_w, c_h = metrics['center']['w'], metrics['center']['h']
         
-        if not self.original: return
+        render_w, render_h = self.displayed_size
         
-        ratio = min(cw/self.original.width, ch/self.original.height)
-        base_w = int(self.original.width * ratio)
-        base_h = int(self.original.height * ratio)
+        if self.original is None: return
+        
+        h, w = self.original.shape[:2]
+        
+        ratio = min(c_w / w, c_h / h)
+        base_w = int(w * ratio)
+        base_h = int(h * ratio)
         
         render_w = base_w * self.single_scale
         render_h = base_h * self.single_scale
         
-        max_off_x = (render_w - cw) / 2 if render_w > cw else (cw - render_w) / 2
-        max_off_y = (render_h - ch) / 2 if render_h > ch else (ch - render_h) / 2
+        max_off_x = (render_w - c_w) / 2 if render_w > c_w else (c_w - render_w) / 2
+        max_off_y = (render_h - c_h) / 2 if render_h > c_h else (c_h - render_h) / 2
         
-        if render_w <= cw:
-            self.single_offset_x = 0 # Force center
-        else:
-            self.single_offset_x = max(-max_off_x, min(max_off_x, self.single_offset_x))
+        if render_w <= c_w: self.single_offset_x = 0
+        else: self.single_offset_x = max(-max_off_x, min(max_off_x, self.single_offset_x))
             
-        if render_h <= ch:
-            self.single_offset_y = 0
-        else:
-            self.single_offset_y = max(-max_off_y, min(max_off_y, self.single_offset_y))
+        if render_h <= c_h: self.single_offset_y = 0
+        else: self.single_offset_y = max(-max_off_y, min(max_off_y, self.single_offset_y))
 
-    # --- GRID PANNING CONSTRAINT ---
     def apply_pan_constraint(self, tile, dx, dy, idx):
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
         metrics = self.get_layout_metrics(cw, ch)
         gx, gy, gw, gh = metrics['grid']['x'], metrics['grid']['y'], metrics['grid']['w'], metrics['grid']['h']
         _, _, cell_w, cell_h = self.get_cell_rect(idx, gx, gy, gw, gh)
         
-        img_ratio = tile.original.width / tile.original.height
+        img_ratio = tile.w / tile.h
         cell_ratio = cell_w / cell_h
         
         if img_ratio > cell_ratio: 
@@ -841,7 +1580,7 @@ class Cropper:
                 self.rect = None
                 self.coords = None
                 self.original_coords = None
-                self.processed_image = None # clear effect cache
+                self.processed_image = None
                 self.display()
             else: self.reset_app()
         else: self.reset_app()
@@ -854,15 +1593,16 @@ class Cropper:
         self.draw_welcome()
         self.left_frame.pack_forget()
         self.set_ui_mode("single")
+        self.btn_full_img.pack_forget()
         self.single_controls.pack_forget()
-        self.slider_container.pack_forget()
+        self.slider.pack_forget() 
         self.root.title(TITLE)
         self.buttons_shown = False
         self.banners_active = {k:False for k in self.banners_active}
         self.banner_images = {k:None for k in self.banner_images}
         for btn in self.banner_btns.values(): btn.config(bg=BTN_BG, fg=TEXT_INACTIVE)
+        for btn in self.single_banner_btns.values(): btn.config(bg=BTN_BG, fg=TEXT_INACTIVE)
         
-        # Reset Single Mode
         self.single_scale = 1.0
         self.single_offset_x = 0
         self.single_offset_y = 0
@@ -873,38 +1613,78 @@ class Cropper:
 
     def set_ui_mode(self, mode_type):
         self.mode_type = mode_type
-        self.single_controls.pack_forget(); self.grid_controls.pack_forget(); self.slider_container.pack_forget()
+        self.single_controls.pack_forget()
+        self.grid_controls.pack_forget()
+        
         if mode_type == "single":
             self.single_controls.pack(side="left", fill="y")
-            self.slider_container.pack(side="right", fill="x", expand=True, padx=(20, 0))
-        else: self.grid_controls.pack(side="left", fill="y")
+            self.btn_full_img.pack(side="left", padx=(0, 15))
+            self.refresh_single_controls_layout()
+        else:
+            self.grid_controls.pack(side="left", fill="y")
+            self.btn_full_img.pack_forget()
 
     def update_bottom_ui_state(self):
         if self.mode_type == "grid": return
         mode = self.effect_mode.get()
-        self.btn_blur.config(bg=BRAND if mode=="blur" else BTN_BG, fg=TEXT_ACTIVE if mode=="blur" else TEXT_INACTIVE)
-        self.btn_pixel.config(bg=BRAND if mode=="pixelate" else BTN_BG, fg=TEXT_ACTIVE if mode=="pixelate" else TEXT_INACTIVE)
-        if self.effect_enabled.get() == 1: self.btn_full_img.config(text="Save Full", bg=BRAND, fg=TEXT_ACTIVE)
-        else: self.btn_full_img.config(text="Save Cropped", bg=BTN_BG, fg=TEXT_INACTIVE)
+        self.btn_blur.config(bg=self.brand_color if mode=="blur" else BTN_BG, fg=TEXT_ACTIVE if mode=="blur" else TEXT_INACTIVE)
+        self.btn_pixel.config(bg=self.brand_color if mode=="pixelate" else BTN_BG, fg=TEXT_ACTIVE if mode=="pixelate" else TEXT_INACTIVE)
+        
+        banners_on = any(self.banners_active.values())
+        effect_on = mode != "none"
+        
+        should_be_full = banners_on or effect_on
+        
+        if should_be_full:
+            self.effect_enabled.set(1)
+            self.btn_full_img.config(text="Save Full", bg=self.brand_color, fg=TEXT_ACTIVE)
+        else:
+            self.effect_enabled.set(0)
+            self.btn_full_img.config(text="Save Cropped", bg=BTN_BG, fg=TEXT_INACTIVE)
 
     def set_mode_with_fade(self, mode):
         self.current_mode = mode; self.mode = mode
         for m, btn in self.btns.items():
-            btn.config(bg=BRAND if m==mode else BTN_BG, fg=TEXT_ACTIVE if m==mode else TEXT_INACTIVE)
+            btn.config(bg=self.brand_color if m==mode else BTN_BG, fg=TEXT_ACTIVE if m==mode else TEXT_INACTIVE)
         if self.mode_type == "single":
-            if self.rect: 
-                self.draw_crop_rect()
-            
+            if self.rect: self.draw_crop_rect()
             if self.effect_mode.get() != "none": self.update_preview_delayed()
         else: self.display_grid()
 
     def animate_layout_transition(self, target_compact, step=0, steps=12):
+        if step == 0 and self.anim_job:
+            try: self.root.after_cancel(self.anim_job)
+            except: pass
+
         start_w, end_w = (10, 6) if target_compact else (6, 10)
         ratio = step / steps
         curr_w = int(start_w + (end_w - start_w) * ratio)
+        
+        b_start_w, b_end_w = (6, 2) if target_compact else (2, 6)
+        b_curr_w = int(b_start_w + (b_end_w - b_start_w) * ratio)
+
         font_cfg = ("Segoe UI", 10 if target_compact else 11, "bold")
         for mode, btn in self.btns.items(): btn.config(width=curr_w, font=font_cfg)
-        if step < steps: self.anim_job = self.root.after(15, lambda: self.animate_layout_transition(target_compact, step+1, steps))
+        
+        if step == 0:
+            def get_text(side): return side.capitalize()[0] if target_compact else side.capitalize()
+            
+            for side, btn in self.single_banner_btns.items():
+                btn.config(text=get_text(side))
+            
+            for side, btn in self.banner_btns.items():
+                btn.config(text=get_text(side))
+        
+        for btn in self.single_banner_btns.values():
+            btn.config(width=b_curr_w)
+            
+        for btn in self.banner_btns.values():
+            btn.config(width=b_curr_w)
+
+        if step < steps: 
+            self.anim_job = self.root.after(15, lambda: self.animate_layout_transition(target_compact, step+1, steps))
+        else:
+            self.anim_job = None
 
     def fade_in(self, widget, target_hex, steps=20, step=0):
         if step == 0: widget.config(fg=BG)
@@ -918,10 +1698,12 @@ class Cropper:
 
     def load(self, p):
         try:
-            img = Image.open(p).convert("RGB")
-            self.original = img; self.path = p
+            with open(p, "rb") as f:
+                arr = np.asarray(bytearray(f.read()), dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             
-            # Reset view & crop when loading new image
+            self.original = img
+            self.path = p
             self.single_scale = 1.0
             self.single_offset_x = 0
             self.single_offset_y = 0
@@ -930,25 +1712,21 @@ class Cropper:
             self.rect = None
             self.processed_image = None
             self.effect_mode.set("none") 
-            
-            # Reset mode to free
             self.mode = "free"
             self.current_mode = "free"
-
-            self.canvas.delete("all"); self.display(); 
-            
-            if not self.buttons_shown:
-                self.show_toolbar()
-            else:
-                self.set_mode_with_fade("free")
-            
+            self.canvas.delete("all")
+            self.display()
+            if not self.buttons_shown: self.show_toolbar()
+            else: self.set_mode_with_fade("free")
             self.update_bottom_ui_state()
             self.update_window_title()
             self.show_status("Drag to Crop • Right-Click to Pan")
-        except: pass
+        except Exception as e:
+            print(f"Load error: {e}")
 
     def load_image_object(self, img_obj):
-        self.original = img_obj.convert("RGB"); self.path = "clipboard_image.png"
+        self.original = cv2.cvtColor(np.array(img_obj.convert("RGB")), cv2.COLOR_RGB2BGR)
+        self.path = "clipboard_image.png"
         self.single_scale = 1.0
         self.single_offset_x = 0
         self.single_offset_y = 0
@@ -957,24 +1735,18 @@ class Cropper:
         self.rect = None
         self.processed_image = None
         self.effect_mode.set("none")
-        
-        # Reset mode to free
         self.mode = "free"
         self.current_mode = "free"
-
-        self.canvas.delete("all"); self.display(); 
-        
-        if not self.buttons_shown:
-            self.show_toolbar()
-        else:
-            self.set_mode_with_fade("free")
-            
+        self.canvas.delete("all")
+        self.display()
+        if not self.buttons_shown: self.show_toolbar()
+        else: self.set_mode_with_fade("free")
         self.update_bottom_ui_state()
         self.update_window_title()
         self.show_status("Drag to Crop • Right-Click to Pan")
 
     def generate_processed_image(self):
-        if not self.original or not self.original_coords: 
+        if self.original is None: 
             self.processed_image = None
             return
 
@@ -982,76 +1754,99 @@ class Cropper:
             self.processed_image = None
             return
 
-        ox0, oy0, ox1, oy1 = self.original_coords
-        ox0 = int(max(0, ox0)); oy0 = int(max(0, oy0))
-        ox1 = int(min(self.original.width, ox1)); oy1 = int(min(self.original.height, oy1))
+        strength = max(1, int(self.strength.get()))
         
-        strength = max(0, int(self.strength.get()))
-        
-        # 1. Create Effect Layer on FULL image
-        full_img = self.original.copy()
+        gpu_src = cv2.UMat(self.original)
         
         if self.effect_mode.get() == "blur":
-            effect_layer = full_img.filter(ImageFilter.GaussianBlur(radius=strength))
+            k = strength if strength % 2 == 1 else strength + 1
+            gpu_processed = cv2.GaussianBlur(gpu_src, (k, k), 0)
+            
         elif self.effect_mode.get() == "pixelate" and strength > 0:
-            w, h = full_img.size
-            small = full_img.resize((max(1, w//strength), max(1, h//strength)), Image.Resampling.NEAREST)
-            effect_layer = small.resize((w, h), Image.Resampling.NEAREST)
+            h, w = self.original.shape[:2]
+            small_w = max(1, w // strength)
+            small_h = max(1, h // strength)
+            gpu_small = cv2.resize(gpu_src, (small_w, small_h), interpolation=cv2.INTER_LANCZOS4)
+            gpu_processed = cv2.resize(gpu_small, (w, h), interpolation=cv2.INTER_LANCZOS4)
         else:
-            effect_layer = full_img
+            gpu_processed = gpu_src
 
-        # 2. Create Mask (White = Effect, Black = Original/Clean)
-        # We want effect everywhere EXCEPT the crop box.
-        mask = Image.new("L", full_img.size, 255) # White base (Effect everywhere)
-        draw = ImageDraw.Draw(mask)
-        draw.rectangle((ox0, oy0, ox1, oy1), fill=0) # Black box (Clean inside)
+        effect_layer = gpu_processed.get()
 
-        # --- SOFT EDGE (FEATHERING) LOGIC ---
-        # Blur the mask so the transition from Black (Clean) to White (Effect) is soft
-        feather_radius = max(5, int(min(self.original.width, self.original.height) * 0.01))
-        mask = mask.filter(ImageFilter.GaussianBlur(radius=feather_radius))
-        # ------------------------------------
-        
-        # 3. Paste Effect Layer onto Original using Mask
-        base = self.original.copy()
-        base.paste(effect_layer, mask=mask)
-        
-        self.processed_image = base
+        if self.original_coords:
+            ox0, oy0, ox1, oy1 = map(int, self.original_coords)
+            h, w = self.original.shape[:2]
+            
+            mask = np.ones((h, w), dtype=np.uint8) * 255
+            cv2.rectangle(mask, (ox0, oy0), (ox1, oy1), 0, -1)
+            
+            feather = max(5, int(min(w, h) * 0.01))
+            if feather % 2 == 0: feather += 1
+            mask = cv2.GaussianBlur(mask, (feather, feather), 0)
+            
+            mask_float = mask.astype(float) / 255.0
+            mask_float = np.stack([mask_float]*3, axis=2)
+            
+            
+            blended = (self.original * (1.0 - mask_float) + effect_layer * mask_float).astype(np.uint8)
+            self.processed_image = blended
+        else:
+            self.processed_image = effect_layer
 
     def display(self):
-        if not self.original: return
+        if self.original is None: return
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-        if cw<=1: self.root.after(100, self.display); return
+        if cw <= 1: self.root.after(100, self.display); return
+        self.canvas.delete("all")
         
-        # Determine which source image to render
+        self.canvas.create_rectangle(0, 0, cw, ch, fill=CANVAS_BG, outline="")
+        
+        metrics = self.get_single_layout_metrics(cw, ch)
+        
+        center = metrics['center']
+        min_x, min_y = center['x'], center['y']
+        max_x, max_y = center['x'] + center['w'], center['y'] + center['h']
+        
+        for side, rect in metrics['banners'].items():
+            min_x = min(min_x, rect['x']); min_y = min(min_y, rect['y'])
+            max_x = max(max_x, rect['x'] + rect['w']); max_y = max(max_y, rect['y'] + rect['h'])
+            
+        gap_bg_color = self.grid_bg_var.get()
+        try:
+            self.canvas.create_rectangle(min_x, min_y, max_x, max_y, fill=gap_bg_color, outline="")
+        except:
+            self.canvas.create_rectangle(min_x, min_y, max_x, max_y, fill=BG, outline="")
+        
+        for side, rect in metrics['banners'].items():
+            self.render_banner_image(side, rect)
+
+        c_x, c_y, c_w, c_h = metrics['center']['x'], metrics['center']['y'], metrics['center']['w'], metrics['center']['h']
+        
         source_img = self.original
-        
-        # Logic fix: If coords exist and mode != none, allow processed_image.
-        # BUT if user cleared selection (coords=None), force original.
-        if self.coords and self.processed_image and self.effect_mode.get() != "none":
+        if self.processed_image is not None and self.effect_mode.get() != "none":
             source_img = self.processed_image
 
-        # Calculate Base Fit
-        ratio = min(cw/source_img.width, ch/source_img.height)
-        nw = int(source_img.width * ratio * self.single_scale)
-        nh = int(source_img.height * ratio * self.single_scale)
+        sh, sw = source_img.shape[:2]
+
+        ratio = min(c_w/sw, c_h/sh)
+        nw = int(sw * ratio * self.single_scale)
+        nh = int(sh * ratio * self.single_scale)
         
         try:
-            resized = source_img.resize((nw, nh), Image.Resampling.LANCZOS)
-            self.displayed_photo = ImageTk.PhotoImage(resized)
+            resized = cv2.resize(source_img, (nw, nh), interpolation=cv2.INTER_LANCZOS4)
+            
+            self.displayed_photo = self.cv2_to_imagetk(resized)
             self.displayed_size = (nw, nh)
             
-            # Center with offset
-            x = (cw-nw)//2 + self.single_offset_x
-            y = (ch-nh)//2 + self.single_offset_y
+            x = c_x + (c_w-nw)//2 + self.single_offset_x
+            y = c_y + (c_h-nh)//2 + self.single_offset_y
             
-            self.canvas.delete("image")
+            self.canvas.create_rectangle(x, y, x+nw+1, y+nh+1, fill=CANVAS_BG, outline="")
             self.canvas.create_image(x, y, anchor=NW, image=self.displayed_photo, tags="image")
             
-            # Redraw Crop Rect if it exists (mapped from original coords to new view)
             if self.original_coords:
                 ox0, oy0, ox1, oy1 = self.original_coords
-                total_scale = nw / source_img.width
+                total_scale = nw / sw
                 
                 cx0 = (ox0 * total_scale) + x
                 cy0 = (oy0 * total_scale) + y
@@ -1060,7 +1855,8 @@ class Cropper:
                 
                 self.coords = (int(cx0), int(cy0), int(cx1), int(cy1))
                 self.draw_crop_rect()
-        except: pass
+        except Exception as e: 
+            print(f"Display Error: {e}")
 
     def _apply_aspect_to_coords(self, x0, y0, x1, y1, mode):
         if mode == "free": return (x0, y0, x1, y1)
@@ -1078,78 +1874,126 @@ class Cropper:
         self.preview_after_id = self.root.after(50, self.update_preview)
 
     def update_preview(self):
-        if self.mode_type != "single" or not self.original: return
+        if self.mode_type != "single" or self.original is None: return
         
-        if not self.coords: # If no selection, clear effects
+        if not self.coords and self.effect_mode.get() == "none":
             self.processed_image = None
-        
-        # Regenerate effects cache if needed
-        if self.effect_mode.get() != "none" and self.original_coords:
+        else:
             self.generate_processed_image()
-        
+            
         self.display()
 
     def save_crop(self):
-        if not self.original or not self.original_coords: return
+        if self.original is None: return
         
-        ox0, oy0, ox1, oy1 = self.original_coords
-        ox0 = max(0, ox0); oy0 = max(0, oy0)
-        ox1 = min(self.original.width, ox1); oy1 = min(self.original.height, oy1)
+        rgb_original = cv2.cvtColor(self.original, cv2.COLOR_BGR2RGB)
+        pil_original = Image.fromarray(rgb_original)
         
-        crop_box = (int(ox0), int(oy0), int(ox1), int(oy1))
+        backup_original = self.original
+        self.original = pil_original
         
-        is_effect_save = self.effect_enabled.get() == 1 and self.effect_mode.get() != "none"
-        
-        if is_effect_save:
-            full_img = self.original.copy()
-            strength = max(0, int(self.strength.get()))
-            
-            # Apply effect to FULL image
-            if self.effect_mode.get() == "blur": 
-                effect_layer = full_img.filter(ImageFilter.GaussianBlur(radius=strength))
-            elif self.effect_mode.get() == "pixelate":
-                w, h = full_img.size
-                small = full_img.resize((max(1, w//strength), max(1, h//strength)), Image.Resampling.NEAREST)
-                effect_layer = small.resize((w, h), Image.Resampling.NEAREST)
+        backup_banners = {}
+        for side, tile in self.banner_images.items():
+            if tile:
+                backup_banners[side] = tile.original
+                rgb_tile = cv2.cvtColor(tile.original, cv2.COLOR_BGR2RGB)
+                tile.original = Image.fromarray(rgb_tile)
+
+        try:
+            has_banners = any(self.banners_active.values())
+            is_effect_save = (self.effect_enabled.get() == 1) or has_banners
+
+            if is_effect_save:
+                base_w = 3000
+                metrics = self.get_single_layout_metrics(base_w * 3, base_w * 3, is_save=True)
+                
+                center = metrics['center']
+                min_x = center['x']; min_y = center['y']
+                max_x = center['x']+center['w']; max_y = center['y']+center['h']
+                
+                for side, rect in metrics['banners'].items():
+                    min_x = min(min_x, rect['x']); min_y = min(min_y, rect['y'])
+                    max_x = max(max_x, rect['x']+rect['w']); max_y = max(max_y, rect['y']+rect['h'])
+                    
+                final_w = max_x - min_x
+                final_h = max_y - min_y
+                
+                bg_color = self.grid_bg_var.get()
+                try: master = Image.new("RGB", (final_w, final_h), bg_color)
+                except: master = Image.new("RGB", (final_w, final_h), BG)
+                
+                for side, rect in metrics['banners'].items():
+                    tile = self.banner_images[side]
+                    rw = rect['w']; rh = rect['h']
+                    rx = rect['x'] - min_x
+                    ry = rect['y'] - min_y
+                    
+                    if not tile:
+                        draw = ImageDraw.Draw(master); draw.rectangle((rx, ry, rx+rw, ry+rh), fill="#151515")
+                    else:
+                        res = tile.original.resize((rw, rh), Image.Resampling.LANCZOS)
+                        master.paste(res, (rx, ry))
+
+                cx = center['x'] - min_x
+                cy = center['y'] - min_y
+                cw_save = center['w']
+                ch_save = center['h']
+                
+                to_paste = self.original.copy()
+                
+                if self.effect_mode.get() != "none":
+                    full_img = self.original.copy()
+                    strength = max(0, int(self.strength.get()))
+                    
+                    if self.effect_mode.get() == "blur": 
+                        effect_layer = full_img.filter(ImageFilter.GaussianBlur(radius=strength))
+                    elif self.effect_mode.get() == "pixelate":
+                        w, h = full_img.size
+                        small = full_img.resize((max(1, w//strength), max(1, h//strength)), Image.Resampling.LANCZOS)
+                        effect_layer = small.resize((w, h), Image.Resampling.LANCZOS)
+                    else: effect_layer = full_img
+                    
+                    if self.original_coords:
+                        ox0, oy0, ox1, oy1 = self.original_coords
+                        mask = Image.new("L", full_img.size, 255)
+                        draw = ImageDraw.Draw(mask)
+                        draw.rectangle((ox0, oy0, ox1, oy1), fill=0)
+                        feather_radius = max(5, int(min(self.original.width, self.original.height) * 0.01))
+                        mask = mask.filter(ImageFilter.GaussianBlur(radius=feather_radius))
+                        to_paste.paste(effect_layer, mask=mask)
+                    else:
+                        to_paste = effect_layer
+
+                res_main = to_paste.resize((cw_save, ch_save), Image.Resampling.LANCZOS)
+                master.paste(res_main, (cx, cy))
+                
+                final = master
+                suffix_str = "_full"
             else: 
-                effect_layer = full_img
+                if not self.original_coords: return
+                ox0, oy0, ox1, oy1 = self.original_coords
+                ox0 = max(0, ox0); oy0 = max(0, oy0)
+                ox1 = min(self.original.width, ox1); oy1 = min(self.original.height, oy1)
+                final = self.original.crop((int(ox0), int(oy0), int(ox1), int(oy1)))
+                suffix_str = "_crop"
 
-            # Create Mask (White everywhere, Black inside crop)
-            mask = Image.new("L", full_img.size, 255)
-            draw = ImageDraw.Draw(mask)
-            draw.rectangle(crop_box, fill=0)
-
-            # --- SOFT EDGE (FEATHERING) LOGIC FOR SAVE ---
-            feather_radius = max(5, int(min(self.original.width, self.original.height) * 0.01))
-            mask = mask.filter(ImageFilter.GaussianBlur(radius=feather_radius))
-            # ---------------------------------------------
+            p = Path(self.path)
+            if p.name == "clipboard_image.png": base_name = "clipboard"
+            else: base_name = p.stem
             
-            # Paste effect onto clean image
-            base = self.original.copy()
-            base.paste(effect_layer, mask=mask)
-            
-            final = base
-        else: 
-            final = self.original.crop(crop_box) 
-            
-        p = Path(self.path)
-        
-        suffix_str = "_effect" if is_effect_save else "_crop"
-        
-        if p.name == "clipboard_image.png":
-            base_name = "clipboard"
-        else:
-            base_name = p.stem
-            
-        out = p.parent / f"{base_name}{suffix_str}{p.suffix}"
-        
-        i = 1
-        while out.exists():
-            out = p.parent / f"{base_name}{suffix_str}_{i}{p.suffix}"
-            i += 1
-            
-        final.save(out, quality=98)
-        self.show_status(f"Saved: {out.name}")
+            out = p.parent / f"{base_name}{suffix_str}{p.suffix}"
+            i = 1
+            while out.exists():
+                out = p.parent / f"{base_name}{suffix_str}_{i}{p.suffix}"
+                i += 1
+                
+            final.save(out, quality=100)
+            self.show_status(f"Saved: {out.name}")
+        finally:
+            self.original = backup_original
+            for side, tile in self.banner_images.items():
+                if tile and side in backup_banners:
+                    tile.original = backup_banners[side]
 
     def toggle_full_image_mode(self):
         self.effect_enabled.set(1 - self.effect_enabled.get())
@@ -1163,16 +2007,10 @@ class Cropper:
         if self.preview_after_id: self.root.after_cancel(self.preview_after_id); self.preview_after_id = None
 
     def set_effect_type(self, mode):
-        # Toggle effect mode
         new_mode = "none" if self.effect_mode.get() == mode else mode
         self.effect_mode.set(new_mode)
-        
-        # Auto-toggle "Save Full" based on whether an effect is active
-        if new_mode != "none":
-            self.effect_enabled.set(1)
-        else:
-            self.effect_enabled.set(0)
-            
+        if new_mode != "none": self.effect_enabled.set(1)
+        else: self.effect_enabled.set(0)
         self.update_bottom_ui_state()
         if self.mode_type == "single": self.update_preview_delayed()
 
@@ -1194,13 +2032,16 @@ class Cropper:
     def render_banner_image(self, side, rect):
         tile = self.banner_images[side]
         x, y, w, h = rect['x'], rect['y'], rect['w'], rect['h']
+        
+        self.canvas.create_rectangle(x, y, x+w, y+h, fill=CANVAS_BG, outline="")
+
         if not tile:
             self.canvas.create_rectangle(x, y, x+w, y+h, fill="#151515", outline="")
             self.canvas.create_text(x + w/2, y + h/2, text=side.upper(), fill="#333333", font=("Segoe UI", 14, "bold"))
             return
         try:
-            small = tile.original.resize((w, h), Image.Resampling.BILINEAR)
-            tk_img = ImageTk.PhotoImage(small)
+            small = cv2.resize(tile.original, (w, h), interpolation=cv2.INTER_LANCZOS4)
+            tk_img = self.cv2_to_imagetk(small)
             tile.tk_ref = tk_img 
             self.canvas.create_image(x, y, anchor=NW, image=tk_img)
         except: pass
@@ -1211,7 +2052,6 @@ class Cropper:
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
         metrics = self.get_layout_metrics(cw, ch)
         
-        # --- DRAW BACKGROUND RECTANGLE ---
         if only_index == -1:
             min_x, min_y = 99999, 99999
             max_x, max_y = -99999, -99999
@@ -1225,43 +2065,35 @@ class Cropper:
                 max_x = max(max_x, r['x']+r['w']); max_y = max(max_y, r['y']+r['h'])
 
             bg_color = self.grid_bg_var.get()
-            try:
-                self.canvas.create_rectangle(min_x, min_y, max_x, max_y, fill=bg_color, outline="")
-            except: 
-                self.canvas.create_rectangle(min_x, min_y, max_x, max_y, fill=BG, outline="")
-
+            try: self.canvas.create_rectangle(min_x, min_y, max_x, max_y, fill=bg_color, outline="")
+            except: self.canvas.create_rectangle(min_x, min_y, max_x, max_y, fill=BG, outline="")
+            
             for side, rect in metrics['banners'].items(): self.render_banner_image(side, rect)
         
-        # Draw Grid Tiles
         gx, gy, gw, gh = metrics['grid']['x'], metrics['grid']['y'], metrics['grid']['w'], metrics['grid']['h']
         indices = range(len(self.grid_tiles)) if only_index == -1 else [only_index]
+        
         for i in indices:
             tile = self.grid_tiles[i]
             cx, cy, cw, ch = self.get_cell_rect(i, gx, gy, gw, gh)
-            img_ratio = tile.original.width / tile.original.height
-            cell_ratio = cw / ch
-            if img_ratio > cell_ratio: base_h = ch; base_w = base_h * img_ratio
-            else: base_w = cw; base_h = base_w / img_ratio
             
-            # Calculate current render size
+            self.canvas.create_rectangle(cx, cy, cx+cw, cy+ch, fill=CANVAS_BG, outline="")
+
+            if not hasattr(tile, 'w'): tile.h, tile.w = tile.original.shape[:2]
+                
+            img_ratio = tile.w / tile.h
+            cell_ratio = cw / ch
+            
+            if img_ratio > cell_ratio: 
+                base_h = ch
+                base_w = int(base_h * img_ratio)
+            else: 
+                base_w = cw
+                base_h = int(base_w / img_ratio)
+                
             render_w = int(base_w * tile.scale)
             render_h = int(base_h * tile.scale)
             
-            # --- FIX: PROPORTIONAL OFFSET ADJUSTMENT ---
-            # If the render size changed due to layout shift or fitting strategy change,
-            # scale the offset to keep the visual center stable.
-            if tile.last_render_w > 0 and tile.last_render_h > 0:
-                if render_w != tile.last_render_w:
-                    tile.offset_x = tile.offset_x * (render_w / tile.last_render_w)
-                if render_h != tile.last_render_h:
-                    tile.offset_y = tile.offset_y * (render_h / tile.last_render_h)
-            
-            # Update last known size
-            tile.last_render_w = render_w
-            tile.last_render_h = render_h
-            # -------------------------------------------
-            
-            # --- SAFETY CLAMP: Ensure image is not out of bounds when layout changes ---
             max_off_x = (render_w - cw) / 2
             max_off_y = (render_h - ch) / 2
             
@@ -1270,146 +2102,179 @@ class Cropper:
             
             if render_h < ch: tile.offset_y = 0
             else: tile.offset_y = max(-max_off_y, min(max_off_y, tile.offset_y))
-            # --------------------------------------------------------------------------
 
             try:
-                small = tile.original.resize((render_w, render_h), Image.Resampling.BILINEAR)
-                img_cx = render_w // 2; img_cy = render_h // 2
-                left = img_cx - (cw // 2) - tile.offset_x; top = img_cy - (ch // 2) - tile.offset_y
-                right = left + cw; bottom = top + ch
                 
-                # Use int() to ensure crop box coordinates are valid
-                cropped = small.crop((int(left), int(top), int(right), int(bottom)))
+                is_active = (i == self.active_tile_index)
+                interpolation = cv2.INTER_LANCZOS4
                 
-                tk_img = ImageTk.PhotoImage(cropped)
-                tile.tk_ref = tk_img 
-                self.canvas.delete(f"tile_{i}")
-                self.canvas.create_image(cx, cy, anchor=NW, image=tk_img, tags=f"tile_{i}")
-            except: pass
+                if render_w <= 0 or render_h <= 0: continue
+                small = cv2.resize(tile.proxy, (render_w, render_h), interpolation=interpolation)
+                
+                img_cx = render_w // 2
+                img_cy = render_h // 2
+                
+                left = img_cx - (cw // 2) - int(tile.offset_x)
+                top = img_cy - (ch // 2) - int(tile.offset_y)
+                right = left + cw
+                bottom = top + ch
+                
+                src_x_start = max(0, left)
+                src_y_start = max(0, top)
+                src_x_end = min(render_w, right)
+                src_y_end = min(render_h, bottom)
+                
+                dst_w = src_x_end - src_x_start
+                dst_h = src_y_end - src_y_start
+                
+                if dst_w > 0 and dst_h > 0:
+                    cropped = small[src_y_start:src_y_end, src_x_start:src_x_end]
+                    
+                    tk_img = self.cv2_to_imagetk(cropped)
+                    tile.tk_ref = tk_img 
+                    
+                    dest_x = cx + (src_x_start - left)
+                    dest_y = cy + (src_y_start - top)
+                    
+                    self.canvas.delete(f"tile_{i}")
+                    self.canvas.create_image(dest_x, dest_y, anchor=NW, image=tk_img, tags=f"tile_{i}")
+            except Exception as e: 
+                print(f"Grid Render Error: {e}")
 
     def save_grid(self):
-        base_grid_w = 3000
-        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-        metrics_disp = self.get_layout_metrics(cw, ch)
-        
-        disp_gw = metrics_disp['grid']['w']; disp_gh = metrics_disp['grid']['h']
-        if disp_gw == 0: return
-        grid_ar = disp_gh / disp_gw
-        base_grid_h = int(base_grid_w * grid_ar)
-        
-        # Scale gaps for high res
-        gap = int(self.grid_gap.get() * (base_grid_w / disp_gw))
-        b_gap = gap if self.banner_gap_enabled.get() == 1 else 0
-        
-        banners_save = {}
-        
-        def get_ratio(side, is_vertical_banner):
-            img = self.banner_images[side]
-            if img and img.original:
-                w, h = img.original.width, img.original.height
-                if is_vertical_banner: return w / h
-                else: return h / w
-            return DEFAULT_BANNER_THICKNESS_RATIO
-
-        final_w = base_grid_w
-        final_h = base_grid_h
-        grid_x = 0; grid_y = 0
-        
-        if self.banners_active['left']:
-            ar = get_ratio('left', True)
-            w = int(base_grid_h * ar)
-            final_w += (w + b_gap)
-            grid_x += (w + b_gap)
-            banners_save['left'] = {'x':0, 'y':0, 'w':w, 'h':base_grid_h} 
+        backup_tiles = []
+        for tile in self.grid_tiles:
+            backup_tiles.append(tile.original)
+            rgb = cv2.cvtColor(tile.original, cv2.COLOR_BGR2RGB)
+            tile.original = Image.fromarray(rgb)
             
-        if self.banners_active['right']:
-            ar = get_ratio('right', True)
-            w = int(base_grid_h * ar)
-            final_w += (w + b_gap)
-            banners_save['right'] = {'x':0, 'y':0, 'w':w, 'h':base_grid_h} 
-            
-        row_w = final_w
-        
-        if self.banners_active['top']:
-            ar = get_ratio('top', False)
-            h = int(row_w * ar)
-            final_h += (h + b_gap)
-            grid_y += (h + b_gap)
-            banners_save['top'] = {'x':0, 'y':0, 'w':row_w, 'h':h}
-            
-        if self.banners_active['bottom']:
-            ar = get_ratio('bottom', False)
-            h = int(row_w * ar)
-            final_h += (h + b_gap)
-            banners_save['bottom'] = {'x':0, 'y':0, 'w':row_w, 'h':h} 
-
-        if 'left' in banners_save: banners_save['left']['y'] = grid_y
-        if 'right' in banners_save:
-            banners_save['right']['x'] = final_w - banners_save['right']['w']
-            banners_save['right']['y'] = grid_y
-        if 'bottom' in banners_save:
-            banners_save['bottom']['y'] = final_h - banners_save['bottom']['h']
-
-        bg_color = self.grid_bg_var.get()
+        backup_banners = {}
+        for side, tile in self.banner_images.items():
+            if tile:
+                backup_banners[side] = tile.original
+                rgb_tile = cv2.cvtColor(tile.original, cv2.COLOR_BGR2RGB)
+                tile.original = Image.fromarray(rgb_tile)
+                
         try:
-            master = Image.new("RGB", (final_w, final_h), bg_color)
-        except:
-            master = Image.new("RGB", (final_w, final_h), BG)
-        
-        for side, r in banners_save.items():
-            tile = self.banner_images[side]
-            if not tile: 
-                draw = ImageDraw.Draw(master); draw.rectangle((r['x'], r['y'], r['x']+r['w'], r['y']+r['h']), fill="#151515")
-            else:
-                res = tile.original.resize((r['w'], r['h']), Image.Resampling.LANCZOS)
-                master.paste(res, (r['x'], r['y']))
+            base_grid_w = 3000
+            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+            metrics_disp = self.get_layout_metrics(cw, ch)
+            
+            disp_gw = metrics_disp['grid']['w']; disp_gh = metrics_disp['grid']['h']
+            if disp_gw == 0: return
+            grid_ar = disp_gh / disp_gw
+            base_grid_h = int(base_grid_w * grid_ar)
+            
+            gap = int(self.grid_gap.get() * (base_grid_w / disp_gw))
+            b_gap = gap if self.banner_gap_enabled.get() == 1 else 0
+            
+            banners_save = {}
+            def get_ratio(side, is_vertical_banner):
+                img = self.banner_images[side]
+                if img and img.original:
+                    w, h = img.original.width, img.original.height
+                    if is_vertical_banner: return w / h
+                    else: return h / w
+                return DEFAULT_BANNER_THICKNESS_RATIO
 
-        cols = self.grid_cols.get(); rows = math.ceil(len(self.grid_tiles)/cols)
-        cw_standard = (base_grid_w - (gap*(cols-1)))//cols
-        ch = (base_grid_h - (gap*(rows-1)))//rows
-        
-        for i, tile in enumerate(self.grid_tiles):
-            row = i//cols; col = i%cols
+            final_w = base_grid_w
+            final_h = base_grid_h
+            grid_x = 0; grid_y = 0
             
-            # --- LAST ROW FILL LOGIC (SAVE) ---
-            if row == rows - 1 and len(self.grid_tiles) % cols != 0:
-                items_in_row = len(self.grid_tiles) % cols
-                cw = (base_grid_w - (gap * (items_in_row - 1))) // items_in_row
-            else:
-                cw = cw_standard
-            # ----------------------------------
+            if self.banners_active['left']:
+                ar = get_ratio('left', True)
+                w = int(base_grid_h * ar)
+                final_w += (w + b_gap)
+                grid_x += (w + b_gap)
+                banners_save['left'] = {'x':0, 'y':0, 'w':w, 'h':base_grid_h} 
+                
+            if self.banners_active['right']:
+                ar = get_ratio('right', True)
+                w = int(base_grid_h * ar)
+                final_w += (w + b_gap)
+                banners_save['right'] = {'x':0, 'y':0, 'w':w, 'h':base_grid_h} 
+                
+            row_w = final_w
+            
+            if self.banners_active['top']:
+                ar = get_ratio('top', False)
+                h = int(row_w * ar)
+                final_h += (h + b_gap)
+                grid_y += (h + b_gap)
+                banners_save['top'] = {'x':0, 'y':0, 'w':row_w, 'h':h}
+                
+            if self.banners_active['bottom']:
+                ar = get_ratio('bottom', False)
+                h = int(row_w * ar)
+                final_h += (h + b_gap)
+                banners_save['bottom'] = {'x':0, 'y':0, 'w':row_w, 'h':h} 
 
-            tx = grid_x + col*(cw+gap); ty = grid_y + row*(ch+gap)
-            
-            ir = tile.original.width / tile.original.height
-            cr = cw / ch
-            if ir > cr: bh = ch; bw = int(ch*ir)
-            else: bw = cw; bh = int(cw/ir)
-            
-            scale = (base_grid_w / disp_gw) * tile.scale
-            
-            if ir > cr: bh_save = ch; bw_save = int(ch*ir)
-            else: bw_save = cw; bh_save = int(cw/ir)
-            
-            rw_save = int(bw_save * tile.scale); rh_save = int(bh_save * tile.scale)
-            res = tile.original.resize((rw_save, rh_save), Image.Resampling.LANCZOS)
-            
-            screen_scale = base_grid_w / disp_gw
-            off_x = int(tile.offset_x * screen_scale)
-            off_y = int(tile.offset_y * screen_scale)
-            
-            icx = rw_save//2; icy = rh_save//2
-            l = icx - (cw//2) - off_x
-            t = icy - (ch//2) - off_y
-            crop = res.crop((l, t, l+cw, t+ch))
-            master.paste(crop, (tx, ty))
+            if 'left' in banners_save: banners_save['left']['y'] = grid_y
+            if 'right' in banners_save:
+                banners_save['right']['x'] = final_w - banners_save['right']['w']
+                banners_save['right']['y'] = grid_y
+            if 'bottom' in banners_save:
+                banners_save['bottom']['y'] = final_h - banners_save['bottom']['h']
 
-        if self.grid_tiles and os.path.exists(self.grid_tiles[0].path):
-            p = Path(self.grid_tiles[0].path)
-            out = p.parent / f"collage_{p.stem}.jpg"
-        else: out = Path("collage_saved.jpg")
-        master.save(out, quality=95)
-        self.show_status(f"Saved: {out.name}")
+            bg_color = self.grid_bg_var.get()
+            try: master = Image.new("RGB", (final_w, final_h), bg_color)
+            except: master = Image.new("RGB", (final_w, final_h), BG)
+            
+            for side, r in banners_save.items():
+                tile = self.banner_images[side]
+                if not tile: 
+                    draw = ImageDraw.Draw(master); draw.rectangle((r['x'], r['y'], r['x']+r['w'], r['y']+r['h']), fill="#151515")
+                else:
+                    res = tile.original.resize((r['w'], r['h']), Image.Resampling.LANCZOS)
+                    master.paste(res, (r['x'], r['y']))
+
+            cols = self.grid_cols.get(); rows = math.ceil(len(self.grid_tiles)/cols)
+            cw_standard = (base_grid_w - (gap*(cols-1)))//cols
+            ch = (base_grid_h - (gap*(rows-1)))//rows
+            
+            for i, tile in enumerate(self.grid_tiles):
+                row = i//cols; col = i%cols
+                if row == rows - 1 and len(self.grid_tiles) % cols != 0:
+                    items_in_row = len(self.grid_tiles) % cols
+                    cw = (base_grid_w - (gap * (items_in_row - 1))) // items_in_row
+                else: cw = cw_standard
+
+                tx = grid_x + col*(cw+gap); ty = grid_y + row*(ch+gap)
+                
+                ir = tile.original.width / tile.original.height
+                cr = cw / ch
+                if ir > cr: bh = ch; bw = int(ch*ir)
+                else: bw = cw; bh = int(cw/ir)
+                
+                if ir > cr: bh_save = ch; bw_save = int(ch*ir)
+                else: bw_save = cw; bh_save = int(cw/ir)
+                
+                rw_save = int(bw_save * tile.scale); rh_save = int(bh_save * tile.scale)
+                res = tile.original.resize((rw_save, rh_save), Image.Resampling.LANCZOS)
+                
+                screen_scale = base_grid_w / disp_gw
+                off_x = int(tile.offset_x * screen_scale)
+                off_y = int(tile.offset_y * screen_scale)
+                
+                icx = rw_save//2; icy = rh_save//2
+                l = icx - (cw//2) - off_x
+                t = icy - (ch//2) - off_y
+                crop = res.crop((l, t, l+cw, t+ch))
+                master.paste(crop, (tx, ty))
+
+            if self.grid_tiles and os.path.exists(self.grid_tiles[0].path):
+                p = Path(self.grid_tiles[0].path)
+                out = p.parent / f"collage_{p.stem}.jpg"
+            else: out = Path("collage_saved.jpg")
+            master.save(out, quality=100)
+            self.show_status(f"Saved: {out.name}")
+            
+        finally:
+            for i, tile in enumerate(self.grid_tiles):
+                tile.original = backup_tiles[i]
+            for side, tile in self.banner_images.items():
+                if tile and side in backup_banners:
+                    tile.original = backup_banners[side]
 
     def update_grid_cols(self, val):
         if int(val) != self.grid_cols.get():
@@ -1422,28 +2287,36 @@ class Cropper:
     def get_cell_rect(self, index, off_x, off_y, total_w, total_h):
         cols = self.grid_cols.get()
         count = len(self.grid_tiles)
-        rows = math.ceil(count/cols)
+        rows = math.ceil(count / cols)
         gap = self.grid_gap.get()
-        
-        # Standard Height is consistent across all rows
-        ch = (total_h - (gap*(rows-1)))//rows
 
         row = index // cols
         col = index % cols
 
-        # --- LAST ROW FILL LOGIC (DISPLAY) ---
-        # If we are in the last row AND the number of items doesn't perfectly fill columns
         if row == rows - 1 and count % cols != 0:
-            items_in_row = count % cols
-            # Calculate special width for items in this row
-            cw = (total_w - (gap * (items_in_row - 1))) // items_in_row
+            items_in_this_row = count % cols
         else:
-            # Standard calculation
-            cw = (total_w - (gap*(cols-1)))//cols
-        # -------------------------------------
+            items_in_this_row = cols
 
-        x = off_x + col*(cw+gap)
-        y = off_y + row*(ch+gap)
+        cw_this_row = (total_w - (gap * (items_in_this_row - 1))) // items_in_this_row
+        
+        x = off_x + col * (cw_this_row + gap)
+
+        is_last_visual_item = (col == items_in_this_row - 1)
+        
+        if is_last_visual_item:
+            cw = (off_x + total_w) - x
+        else:
+            cw = cw_this_row
+
+        ch_standard = (total_h - (gap * (rows - 1))) // rows
+        y = off_y + row * (ch_standard + gap)
+
+        if row == rows - 1:
+            ch = (off_y + total_h) - y
+        else:
+            ch = ch_standard
+
         return x, y, cw, ch
 
     def get_tile_at_pos(self, x, y):
@@ -1461,7 +2334,7 @@ class Cropper:
         if w<100: return
         cx, cy = w//2, h//2+40
         if self.welcome_icon_photo: self.canvas.create_image(cx, cy-170, image=self.welcome_icon_photo)
-        self.canvas.create_text(cx, cy-80, text="Cropper", fill=BRAND, font=("Segoe UI", 38, "bold"))
+        self.canvas.create_text(cx, cy-80, text="Cropper", fill=self.brand_color, font=("Segoe UI", 38, "bold"))
         self.canvas.create_text(cx, cy-15, text="Single or Collage", fill="white", font=("Segoe UI", 22))
         self.canvas.create_text(cx, cy+60, text="Drop one image to Crop\nDrop multiple to Tile\nCtrl+V to Paste", fill="#bbbbbb", font=("Segoe UI", 16), justify="center")
 
@@ -1470,9 +2343,8 @@ class Cropper:
             self.buttons_shown = True; self.left_frame.pack(side="left", fill="y")
             self.animate_layout_transition(self.root.winfo_width()<1050)
             for m in self.btns:
-                # Fix: Correct colors for active vs inactive
                 if m == self.mode:
-                    self.btns[m].config(bg=BRAND)
+                    self.btns[m].config(bg=self.brand_color)
                     self.fade_in(self.btns[m], TEXT_ACTIVE)
                 else:
                     self.btns[m].config(bg=BTN_BG)
@@ -1480,16 +2352,26 @@ class Cropper:
 
     def show_status(self, text):
         if self.status_label.cget("text")==text: return
-        self.status_label.config(text=text); self.fade_in(self.status_label, BRAND)
+        self.status_label.config(text=text); self.fade_in(self.status_label, self.brand_color)
 
     def on_resize(self):
         w = self.root.winfo_width()
-        if self.original or self.grid_tiles:
-            if w<1050 and not self.is_compact: self.animate_layout_transition(True)
-            elif w>=1050 and self.is_compact: self.animate_layout_transition(False)
+        if self.original is not None or self.grid_tiles:
+            if w<1300 and not self.is_compact: 
+                self.is_compact = True
+                self.animate_layout_transition(True)
+                self.refresh_single_controls_layout() 
+                self.refresh_grid_controls_layout()
+            elif w>=1300 and self.is_compact: 
+                self.is_compact = False
+                self.animate_layout_transition(False)
+                self.refresh_single_controls_layout() 
+                self.refresh_grid_controls_layout()
+        
         if self.mode_type == "single": self.display()
         else: self.display_grid()
-        if not self.original and not self.grid_tiles: self.draw_welcome()
+        
+        if self.original is None and not self.grid_tiles: self.draw_welcome()
 
 if __name__ == "__main__":
     root = TkinterDnD.Tk()
