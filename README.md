@@ -26,8 +26,8 @@ Meant to fullfill a purpose, that of creating cropped / obfuscated versions of a
 
 ---
 
-**If you wish to build this yourself instead, use nuitka with this command:**
+**If you wish to build this yourself instead, after cloning the repository use nuitka with this command:**
 
 ```sh
-nuitka --onefile --windows-icon-from-ico=icon.ico --include-data-file=icon.ico=icon.ico --include-data-file=icon.png=icon.png --remove-output --nofollow-import-to=test --nofollow-import-to=distutils --nofollow-import-to=setuptools --nofollow-import-to=numpy --lto=yes --enable-plugin=tk-inter --mingw64 --windows-console-mode=disable cropper.py
+nuitka --onefile --windows-icon-from-ico=icon.ico --include-data-file=icon.ico=icon.ico --include-data-file=icon.png=icon.png --remove-output --nofollow-import-to=test --nofollow-import-to=distutils --nofollow-import-to=scipy --nofollow-import-to=pandas --nofollow-import-to=unittest --nofollow-import-to=email --nofollow-import-to=xml --nofollow-import-to=http --nofollow-import-to=matplotlib --nofollow-import-to=setuptools --lto=yes --enable-plugin=tk-inter --mingw64 --windows-console-mode=disable '.\cropper.py'
 ```
