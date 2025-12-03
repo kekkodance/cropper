@@ -66,11 +66,12 @@ class TitleBarButton(Canvas):
             self.create_rectangle(cx-pad, cy-pad, cx+pad, cy+pad, outline=self.icon_color, width=1)
             
         elif self.btn_type == "restore":
-            pad = 5
+            pad = 4
             off = 2
-            self.create_polyline(cx-pad+off, cy-pad-off, cx+pad+off, cy-pad-off, 
-                                 cx+pad+off, cy+pad-off, cx+pad-off, cy+pad-off, 
-                                 fill="", outline=self.icon_color)
+            # FIXED: Used create_line and changed 'outline' to 'fill'
+            self.create_line(cx-pad+off, cy-pad-off, cx+pad+off, cy-pad-off, 
+                             cx+pad+off, cy+pad-off, cx+pad-off, cy+pad-off, 
+                             fill=self.icon_color, width=1)
             self.create_rectangle(cx-pad-off, cy-pad+off, cx+pad-off, cy+pad+off, outline=self.icon_color, width=1)
 
         elif self.btn_type == "min":
@@ -359,10 +360,25 @@ class Cropper:
         
         self.root.title(TITLE)
         
-        w_width, w_height = 1400, 850
-        s_width, s_height = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        # --- FIX START: Dynamic resolution handling ---
+        s_width = self.root.winfo_screenwidth()
+        s_height = self.root.winfo_screenheight()
+        
+        # Target size
+        target_w, target_h = 1400, 850
+        
+        # Ensure the window is never larger than the screen minus some padding
+        # (padding ensures the resize handle and title bar are visible)
+        w_width = min(target_w, s_width - 50)
+        w_height = min(target_h, s_height - 80) 
+        
         x = int((s_width / 2) - (w_width / 2))
         y = int((s_height / 2) - (w_height / 2))
+        
+        # Prevent the window from spawning off-screen (negative coordinates)
+        if x < 0: x = 0
+        if y < 0: y = 0
+        
         self.root.geometry(f"{w_width}x{w_height}+{x}+{y}")
 
         self.settings = {
@@ -698,12 +714,22 @@ class Cropper:
                 messagebox.showerror("Error", "Invalid Hex Color code.", parent=win)
                 return
 
+            # 1. Update Settings Data
             self.settings["brand_color"] = new_color
             self.settings["save_gap_bg"] = bool(iv_save_gap.get())
             if self.settings["save_gap_bg"]: self.settings["last_gap_bg"] = self.grid_bg_var.get()
             self.save_settings()
+            
+            # 2. Update the internal color variable
             self.brand_color = new_color
-            self.refresh_ui_colors()
+
+            # 3. Try to refresh the main UI, but catch errors so the window still closes
+            try:
+                self.refresh_ui_colors()
+            except Exception as e:
+                print(f"UI Refresh Error: {e}")
+
+            # 4. Close the window
             win.destroy()
 
         Button(f_btns, text="Save", bg=self.brand_color, fg="white", relief="flat", padx=20, pady=5, font=("Segoe UI", 10, "bold"), command=save_and_close).pack(side="right")
