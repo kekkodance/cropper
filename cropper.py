@@ -68,7 +68,6 @@ class TitleBarButton(Canvas):
         elif self.btn_type == "restore":
             pad = 4
             off = 2
-            # FIXED: Used create_line and changed 'outline' to 'fill'
             self.create_line(cx-pad+off, cy-pad-off, cx+pad+off, cy-pad-off, 
                              cx+pad+off, cy+pad-off, cx+pad-off, cy+pad-off, 
                              fill=self.icon_color, width=1)
@@ -162,31 +161,39 @@ class CustomTitleBar(Frame):
         ctypes.windll.user32.ShowWindow(hwnd, 6)
 
 class Resizer(Frame):
-    def __init__(self, master, **kwargs):
+    def __init__(self, master, app_instance, **kwargs):
         super().__init__(master, bg="#0d0d0d", cursor="size_nw_se", width=16, height=16, **kwargs)
         self.master = master
-        self.bind("<B1-Motion>", self.resize)
-        self._drag_data = {"x": 0, "y": 0}
+        self.app = app_instance
         
         self.canvas = Canvas(self, bg="#0d0d0d", width=16, height=16, highlightthickness=0)
         self.canvas.pack()
+        
         self.canvas.create_line(4, 12, 12, 4, fill="#444444", width=1)
         self.canvas.create_line(8, 12, 12, 8, fill="#444444", width=1)
         self.canvas.create_line(12, 12, 12, 12, fill="#444444", width=1)
         
-        self.canvas.bind("<B1-Motion>", self.resize)
+        self.bind("<ButtonPress-1>", self.start_native_resize)
+        self.canvas.bind("<ButtonPress-1>", self.start_native_resize)
 
-    def resize(self, event):
-        xwin = self.master.winfo_x()
-        ywin = self.master.winfo_y()
-        start_x = event.x_root
-        start_y = event.y_root
+    def start_native_resize(self, event):
         
-        new_w = start_x - xwin
-        new_h = start_y - ywin
+        hwnd = ctypes.windll.user32.GetParent(self.master.winfo_id())
         
-        if new_w > 400 and new_h > 300:
-            self.master.geometry(f"{new_w}x{new_h}")
+        ctypes.windll.user32.ReleaseCapture()
+        
+        ctypes.windll.user32.PostMessageW(hwnd, 0x0112, 0xF008, 0)
+        
+        self.check_resize_end()
+
+    def check_resize_end(self):
+        if ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000:
+            self.master.after(50, self.check_resize_end)
+        else:
+            if self.app.mode_type == "single":
+                self.app.display()
+            else:
+                self.app.display_grid()
 
 def set_appwindow(root):
     hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
@@ -360,22 +367,17 @@ class Cropper:
         
         self.root.title(TITLE)
         
-        # --- FIX START: Dynamic resolution handling ---
         s_width = self.root.winfo_screenwidth()
         s_height = self.root.winfo_screenheight()
         
-        # Target size
         target_w, target_h = 1400, 850
         
-        # Ensure the window is never larger than the screen minus some padding
-        # (padding ensures the resize handle and title bar are visible)
         w_width = min(target_w, s_width - 50)
         w_height = min(target_h, s_height - 80) 
         
         x = int((s_width / 2) - (w_width / 2))
         y = int((s_height / 2) - (w_height / 2))
         
-        # Prevent the window from spawning off-screen (negative coordinates)
         if x < 0: x = 0
         if y < 0: y = 0
         
@@ -407,7 +409,7 @@ class Cropper:
         )
         self.title_bar.pack(side="top", fill="x")
         
-        self.resizer = Resizer(root)
+        self.resizer = Resizer(root,self)
         self.resizer.place(relx=1.0, rely=1.0, x=-16, y=-16)
         
         self.root.after(10, lambda: set_appwindow(self.root))
@@ -714,22 +716,18 @@ class Cropper:
                 messagebox.showerror("Error", "Invalid Hex Color code.", parent=win)
                 return
 
-            # 1. Update Settings Data
             self.settings["brand_color"] = new_color
             self.settings["save_gap_bg"] = bool(iv_save_gap.get())
             if self.settings["save_gap_bg"]: self.settings["last_gap_bg"] = self.grid_bg_var.get()
             self.save_settings()
             
-            # 2. Update the internal color variable
             self.brand_color = new_color
 
-            # 3. Try to refresh the main UI, but catch errors so the window still closes
             try:
                 self.refresh_ui_colors()
             except Exception as e:
                 print(f"UI Refresh Error: {e}")
 
-            # 4. Close the window
             win.destroy()
 
         Button(f_btns, text="Save", bg=self.brand_color, fg="white", relief="flat", padx=20, pady=5, font=("Segoe UI", 10, "bold"), command=save_and_close).pack(side="right")
