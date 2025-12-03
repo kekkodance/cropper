@@ -1,5 +1,6 @@
 import sys
 import os
+import gc
 import ctypes
 import math
 import json
@@ -1086,7 +1087,8 @@ class Cropper:
 
     def cv2_to_imagetk(self, cv_img):
         rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
-        return ImageTk.PhotoImage(image=Image.fromarray(rgb))
+        img = Image.frombuffer("RGB", (cv_img.shape[1], cv_img.shape[0]), rgb, 'raw', 'RGB', 0, 1)
+        return ImageTk.PhotoImage(image=img)
 
     def on_drop(self, e):
         try: files = self.root.tk.splitlist(e.data)
@@ -1613,6 +1615,7 @@ class Cropper:
         self.original = None
         self.grid_tiles = []
         self.canvas.delete("all")
+        gc.collect()
         self.status_label.config(text="") 
         self.draw_welcome()
         self.left_frame.pack_forget()
