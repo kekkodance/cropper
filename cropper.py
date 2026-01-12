@@ -6,7 +6,7 @@ import math
 import json
 from pathlib import Path
 import tkinter as tk
-from tkinter import Canvas, NW, BOTH, Button, Frame, Label, IntVar, StringVar, Entry, Toplevel, messagebox, colorchooser
+from tkinter import Canvas, NW, BOTH, Button, Frame, Label, IntVar, StringVar, Entry, Toplevel, messagebox, colorchooser, filedialog
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from PIL import Image, ImageTk, ImageFilter, ImageDraw, ImageGrab
 import cv2
@@ -94,6 +94,9 @@ class CustomTitleBar(Frame):
         self.pack_propagate(False)
         self._drag_data = {"x": 0, "y": 0}
         
+        self.maximized = False
+        self.pre_max_geometry = None
+        
         self.separator = Frame(self, bg="#333333", height=1)
         self.separator.pack(side="bottom", fill="x")
 
@@ -140,7 +143,7 @@ class CustomTitleBar(Frame):
         self._drag_data["y"] = event.y
 
     def do_move(self, event):
-        if self.master.state() == 'zoomed': return
+        if self.maximized: return
         dx = event.x - self._drag_data["x"]
         dy = event.y - self._drag_data["y"]
         x = self.master.winfo_x() + dx
@@ -148,12 +151,27 @@ class CustomTitleBar(Frame):
         self.master.geometry(f"+{x}+{y}")
 
     def toggle_maximize(self):
-        if self.master.state() == 'zoomed':
-            self.master.state('normal')
+        class RECT(ctypes.Structure):
+            _fields_ = [('left', ctypes.c_long),
+                        ('top', ctypes.c_long),
+                        ('right', ctypes.c_long),
+                        ('bottom', ctypes.c_long)]
+
+        if self.maximized:
+            self.maximized = False
             self.btn_max.btn_type = "max"
+            if self.pre_max_geometry:
+                self.master.geometry(self.pre_max_geometry)
         else:
-            self.master.state('zoomed')
+            self.maximized = True
             self.btn_max.btn_type = "restore"
+            self.pre_max_geometry = self.master.geometry()
+            user32 = ctypes.windll.user32
+            rect = RECT()
+            user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0)
+            width = rect.right - rect.left
+            height = rect.bottom - rect.top
+            self.master.geometry(f"{width}x{height}+{rect.left}+{rect.top}")
         self.btn_max.draw_icon()
 
     def minimize(self):
@@ -389,7 +407,8 @@ class Cropper:
             "save_gap_bg": False,
             "last_gap_bg": "#0d0d0d",
             "collage_prefix": "collage_",
-            "crop_suffix": "_crop"
+            "crop_suffix": "_crop",
+            "output_folder": ""
         }
         self.load_settings()
         self.brand_color = self.settings["brand_color"]
@@ -480,6 +499,10 @@ class Cropper:
             btn.pack(side="left", padx=4, pady=(0, PADDING))
             btn.config(command=lambda m=mode: self.set_mode_with_fade(m))
             self.btns[mode] = btn
+
+        btn_fit = Button(self.left_frame, text="Fit", bg=BTN_BG, fg=BG, activebackground=BTN_BG, **base_style)
+        btn_fit.config(command=lambda: self.set_mode_with_fade("fit"))
+        self.btns["fit"] = btn_fit
 
         self.status_label = Label(top_bar, text="", fg=BG, bg=BG, font=("Segoe UI", 11, "bold"), anchor="e")
         self.status_label.pack(side="right", fill="y", padx=(0, 5), pady=(0, 15))
@@ -635,7 +658,7 @@ class Cropper:
     def open_settings_window(self):
         win = Toplevel(self.root)
         win.title("Settings")
-        win.geometry("400x380")
+        win.geometry("400x440")
         win.configure(bg=BG)
         win.resizable(False, False)
         
@@ -646,8 +669,8 @@ class Cropper:
         root_w = self.root.winfo_width()
         root_h = self.root.winfo_height()
         x = root_x + (root_w // 2) - 200
-        y = root_y + (root_h // 2) - 190 
-        win.geometry(f"400x380+{x}+{y}")
+        y = root_y + (root_h // 2) - 220 
+        win.geometry(f"400x440+{x}+{y}")
 
         container = Frame(win, bg=BG, highlightthickness=1, highlightbackground="#333333")
         container.pack(fill="both", expand=True)
@@ -688,8 +711,28 @@ class Cropper:
                 except: pass
         sv_brand.trace("w", on_entry_change)
 
+        f_output = Frame(content, bg=BG)
+        f_output.pack(fill="x", pady=5)
+        
+        Label(f_output, text="Output Location (Leave empty for default)", bg=BG, fg="#aaaaaa", font=("Segoe UI", 11)).pack(anchor="w")
+        
+        f_out_inner = Frame(f_output, bg=BG)
+        f_out_inner.pack(fill="x", pady=(5, 0))
+        
+        sv_output = StringVar(value=self.settings.get("output_folder", ""))
+        entry_output = Entry(f_out_inner, textvariable=sv_output, bg=BTN_BG, fg="white", font=("Segoe UI", 10), relief="flat")
+        entry_output.pack(side="left", fill="x", expand=True, ipady=4)
+        
+        def browse_folder():
+            d = filedialog.askdirectory(parent=win, title="Select Output Folder")
+            if d:
+                sv_output.set(d)
+
+        btn_browse = Button(f_out_inner, text="...", bg=BTN_BG, fg="white", relief="flat", command=browse_folder, font=("Segoe UI", 10, "bold"), width=4)
+        btn_browse.pack(side="right", padx=(5, 0))
+
         f_naming = Frame(content, bg=BG)
-        f_naming.pack(fill="x", pady=5)
+        f_naming.pack(fill="x", pady=15)
         
         Label(f_naming, text="Naming Convention", bg=BG, fg=self.brand_color, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(5,5))
         
@@ -739,6 +782,7 @@ class Cropper:
             self.settings["save_gap_bg"] = bool(iv_save_gap.get())
             self.settings["collage_prefix"] = sv_c_prefix.get()
             self.settings["crop_suffix"] = sv_c_suffix.get()
+            self.settings["output_folder"] = sv_output.get().strip()
             
             if self.settings["save_gap_bg"]: self.settings["last_gap_bg"] = self.grid_bg_var.get()
             self.save_settings()
@@ -934,11 +978,19 @@ class Cropper:
     def get_single_layout_metrics(self, container_w, container_h, is_save=False):
         if self.original is None: return {'banners': {}, 'center': {'x':0, 'y':0, 'w':100, 'h':100}}
 
-        if isinstance(self.original, Image.Image):
+        has_banners = any(self.banners_active.values())
+        
+        if self.original_coords and has_banners:
+            ox0, oy0, ox1, oy1 = self.original_coords
+            W0 = abs(ox1 - ox0)
+            H0 = abs(oy1 - oy0)
+            if W0 < 1: W0 = 1
+            if H0 < 1: H0 = 1
+        elif isinstance(self.original, Image.Image):
             W0, H0 = self.original.size
         else:
             H0, W0 = self.original.shape[:2]
-        
+
         gap = self.single_gap.get() if not is_save else int(self.single_gap.get() * (container_w / 1000.0 if is_save else 1)) 
 
         def get_banner_dim(side, adj_dim):
@@ -1031,6 +1083,35 @@ class Cropper:
 
         return metrics
 
+    def calculate_natural_grid_ar(self):
+        cols = self.grid_cols.get()
+        if not self.grid_tiles: return 1.0
+        
+        total_normalized_height = 0
+        
+        idx = 0
+        while idx < len(self.grid_tiles):
+            row_tiles = self.grid_tiles[idx : idx + cols]
+            if not row_tiles: break
+            
+            row_aspect_sum = 0
+            for t in row_tiles:
+                if not hasattr(t, 'w') or not hasattr(t, 'h'):
+                    if isinstance(t.original, np.ndarray):
+                        h, w = t.original.shape[:2]
+                    else:
+                        w, h = t.original.size
+                    t.w, t.h = w, h
+                row_aspect_sum += (t.w / t.h)
+            
+            if row_aspect_sum > 0:
+                total_normalized_height += (1.0 / row_aspect_sum)
+                
+            idx += cols
+            
+        if total_normalized_height == 0: return 1.0
+        return 1.0 / total_normalized_height
+
     def get_layout_metrics(self, container_w, container_h, is_save=False):
         gap = self.grid_gap.get() if not is_save else int(self.grid_gap.get() * (container_w/1000))
         b_gap = gap if self.banner_gap_enabled.get() == 1 else 0
@@ -1058,6 +1139,9 @@ class Cropper:
 
         targets = {"1:1":1.0, "4:3":1.333, "3:4":0.75, "16:9":1.777, "9:16":0.5625}
         grid_ar = targets.get(self.mode, None)
+        
+        if self.mode == "fit":
+            grid_ar = self.calculate_natural_grid_ar()
 
         if grid_ar:
             h_based_on_w = avail_w / (r_l + r_r + grid_ar)
@@ -1383,14 +1467,33 @@ class Cropper:
     def handle_right_drag(self, e):
         if self.mode_type == "grid":
             if self.swap_source_index == -1: return
-            target = self.get_tile_at_pos(e.x, e.y)
+            
+            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+            
+            is_outside = e.x < 0 or e.x > cw or e.y < 0 or e.y > ch
+            
             self.canvas.delete("swap_highlight")
-            if target != -1 and target != self.swap_source_index:
-                cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+            self.canvas.delete("remove_indicator")
+            
+            if is_outside:
+                self.canvas.config(cursor="X_cursor")
+                self.canvas.create_text(e.x, e.y, text="🗑 Remove", fill="#FF4444", 
+                                      font=("Segoe UI", 14, "bold"), tags="remove_indicator", anchor="s")
                 metrics = self.get_layout_metrics(cw, ch)
                 gr = metrics['grid']
-                cx, cy, cw, ch = self.get_cell_rect(target, gr['x'], gr['y'], gr['w'], gr['h'])
-                self.canvas.create_rectangle(cx+2, cy+2, cx+cw-2, cy+ch-2, outline=HIGHLIGHT_COLOR, width=4, tags="swap_highlight")
+                gx, gy, gw, gh = gr['x'], gr['y'], gr['w'], gr['h']
+                sx, sy, sw, sh = self.get_cell_rect(self.swap_source_index, gx, gy, gw, gh)
+                self.canvas.create_rectangle(sx+2, sy+2, sx+sw-2, sy+sh-2, outline="#FF4444", width=4, tags="swap_highlight")
+                
+            else:
+                self.canvas.config(cursor="fleur")
+                target = self.get_tile_at_pos(e.x, e.y)
+                if target != -1 and target != self.swap_source_index:
+                    metrics = self.get_layout_metrics(cw, ch)
+                    gr = metrics['grid']
+                    cx, cy, cw_rect, ch_rect = self.get_cell_rect(target, gr['x'], gr['y'], gr['w'], gr['h'])
+                    self.canvas.create_rectangle(cx+2, cy+2, cx+cw_rect-2, cy+ch_rect-2, outline=HIGHLIGHT_COLOR, width=4, tags="swap_highlight")
+                    
         elif self.mode_type == "single":
             if not self.drag_start_pos: return
             dx = e.x - self.drag_start_pos[0]
@@ -1403,13 +1506,40 @@ class Cropper:
 
     def handle_right_release(self, e):
         if self.mode_type == "grid":
-            target = self.get_tile_at_pos(e.x, e.y)
-            if target != -1 and target != self.swap_source_index and self.swap_source_index != -1:
-                self.grid_tiles[self.swap_source_index], self.grid_tiles[target] = self.grid_tiles[target], self.grid_tiles[self.swap_source_index]
-                self.display_grid()
-            self.swap_source_index = -1
             self.canvas.delete("swap_highlight")
+            self.canvas.delete("remove_indicator")
             self.canvas.config(cursor="")
+            
+            if self.swap_source_index == -1: return
+
+            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+            is_outside = e.x < 0 or e.x > cw or e.y < 0 or e.y > ch
+
+            if is_outside:
+                try:
+                    del self.grid_tiles[self.swap_source_index]
+                    self.show_status("Image removed")
+                    
+                    if not self.grid_tiles:
+                        self.reset_app()
+                    else:
+                        count = len(self.grid_tiles)
+                        if count == 1: 
+                            self.slider_cols.set_value(1)
+                            self.grid_cols.set(1)
+                            self.lbl_cols_val.config(text="1")
+                        
+                        self.update_window_title()
+                        self.display_grid()
+                except: pass
+            else:
+                target = self.get_tile_at_pos(e.x, e.y)
+                if target != -1 and target != self.swap_source_index:
+                    self.grid_tiles[self.swap_source_index], self.grid_tiles[target] = self.grid_tiles[target], self.grid_tiles[self.swap_source_index]
+                    self.display_grid()
+            
+            self.swap_source_index = -1
+
         elif self.mode_type == "single":
             self.drag_start_pos = None
             self.canvas.config(cursor="")
@@ -1689,22 +1819,36 @@ class Cropper:
             self.single_controls.pack(side="left", fill="y")
             self.lbl_save_status.pack(side="left", padx=(0, 15))
             self.refresh_single_controls_layout()
+            
+            if "fit" in self.btns:
+                self.btns["fit"].pack_forget()
+                if self.mode == "fit": 
+                    self.set_mode_with_fade("free")
         else:
             self.grid_controls.pack(side="left", fill="y")
             self.lbl_save_status.pack_forget()
+            
+            if "fit" in self.btns:
+                self.btns["fit"].pack(side="left", padx=4, pady=(0, PADDING))
 
     def update_bottom_ui_state(self):
         if self.mode_type == "grid": return
         mode = self.effect_mode.get()
+        
         self.btn_blur.config(bg=self.brand_color if mode=="blur" else BTN_BG, fg=TEXT_ACTIVE if mode=="blur" else TEXT_INACTIVE)
         self.btn_pixel.config(bg=self.brand_color if mode=="pixelate" else BTN_BG, fg=TEXT_ACTIVE if mode=="pixelate" else TEXT_INACTIVE)
         
         banners_on = any(self.banners_active.values())
         effect_on = mode != "none"
+        has_crop = self.original_coords is not None
         
-        should_be_full = banners_on or effect_on
-        
-        if should_be_full:
+        if banners_on:
+            self.effect_enabled.set(1)
+            if has_crop:
+                self.lbl_save_status.config(text="Will save crop and banner/s", fg=self.brand_color)
+            else:
+                self.lbl_save_status.config(text="Will save full image", fg=self.brand_color)
+        elif effect_on:
             self.effect_enabled.set(1)
             self.lbl_save_status.config(text="Will save full image", fg=self.brand_color)
         elif self.rect:
@@ -1909,6 +2053,17 @@ class Cropper:
         if self.processed_image is not None and self.effect_mode.get() != "none":
             source_img = self.processed_image
 
+        banners_on = any(self.banners_active.values())
+
+        if banners_on and self.original_coords:
+            ox0, oy0, ox1, oy1 = map(int, self.original_coords)
+            h, w = source_img.shape[:2]
+            ox0 = max(0, ox0); oy0 = max(0, oy0)
+            ox1 = min(w, ox1); oy1 = min(h, oy1)
+            
+            if ox1 > ox0 and oy1 > oy0:
+                source_img = source_img[oy0:oy1, ox0:ox1]
+
         sh, sw = source_img.shape[:2]
 
         ratio = min(c_w/sw, c_h/sh)
@@ -1960,9 +2115,7 @@ class Cropper:
                         
                         if target_crop_w > 0 and target_crop_h > 0:
                             resized = cv2.resize(source_crop, (target_crop_w, target_crop_h), interpolation=cv2.INTER_LINEAR)
-                            
                             final_img_tk = self.cv2_to_imagetk(resized)
-                            
                             draw_x = int(x + sx1 * current_scale)
                             draw_y = int(y + sy1 * current_scale)
             else:
@@ -1975,7 +2128,7 @@ class Cropper:
                 self.canvas.create_rectangle(draw_x, draw_y, draw_x+final_img_tk.width(), draw_y+final_img_tk.height(), fill=CANVAS_BG, outline="")
                 self.canvas.create_image(draw_x, draw_y, anchor=NW, image=final_img_tk, tags="image")
             
-            if self.original_coords:
+            if self.original_coords and not banners_on:
                 ox0, oy0, ox1, oy1 = self.original_coords
                 total_scale = nw / sw
                 
@@ -1986,6 +2139,10 @@ class Cropper:
                 
                 self.coords = (int(cx0), int(cy0), int(cx1), int(cy1))
                 self.draw_crop_rect()
+            elif banners_on and self.rect:
+                self.canvas.delete(self.rect)
+                self.canvas.delete("handle")
+                self.rect = None
                 
         except Exception as e: 
             print(f"Display Error: {e}")
@@ -2040,7 +2197,6 @@ class Cropper:
                 
                 img_w, img_h = self.original.size
                 
-                
                 target_dim = max(img_w, img_h, 2500)
                 container_size = int(target_dim * 1.5)
 
@@ -2080,8 +2236,14 @@ class Cropper:
                 
                 to_paste = self.original.copy()
                 
+                if self.original_coords:
+                    ox0, oy0, ox1, oy1 = map(int, self.original_coords)
+                    ox0 = max(0, ox0); oy0 = max(0, oy0)
+                    ox1 = min(to_paste.width, ox1); oy1 = min(to_paste.height, oy1)
+                    to_paste = to_paste.crop((ox0, oy0, ox1, oy1))
+                
                 if self.effect_mode.get() != "none":
-                    full_img = self.original.copy()
+                    full_img = to_paste.copy() 
                     val = int(self.strength.get())
                     
                     effect_layer = None
@@ -2091,7 +2253,6 @@ class Cropper:
                         max_dim = max(w, h)
                         scale_factor = max_dim / 1000.0
                         radius = val * 2 * scale_factor
-                        
                         effect_layer = full_img.filter(ImageFilter.GaussianBlur(radius=radius))
                         
                     elif self.effect_mode.get() == "pixelate":
@@ -2101,16 +2262,7 @@ class Cropper:
                         effect_layer = small.resize((w, h), Image.Resampling.NEAREST)
                     
                     if effect_layer is not None:
-                        if self.original_coords:
-                            ox0, oy0, ox1, oy1 = map(int, self.original_coords)
-                            mask = Image.new("L", full_img.size, 255) 
-                            draw = ImageDraw.Draw(mask)
-                            draw.rectangle((ox0, oy0, ox1, oy1), fill=0) 
-                            feather_radius = max(5, int(min(self.original.width, self.original.height) * 0.01))
-                            mask = mask.filter(ImageFilter.GaussianBlur(radius=feather_radius))
-                            to_paste.paste(effect_layer, mask=mask)
-                        else:
-                            to_paste = effect_layer
+                        to_paste = effect_layer
 
                 res_main = to_paste.resize((cw_save, ch_save), Image.Resampling.LANCZOS)
                 master.paste(res_main, (cx, cy))
@@ -2129,10 +2281,16 @@ class Cropper:
             if p.name == "clipboard_image.png": base_name = "clipboard"
             else: base_name = p.stem
             
-            out = p.parent / f"{base_name}{suffix_str}{p.suffix}"
+            custom_out = self.settings.get("output_folder", "")
+            if custom_out and os.path.isdir(custom_out):
+                parent_dir = Path(custom_out)
+            else:
+                parent_dir = p.parent
+
+            out = parent_dir / f"{base_name}{suffix_str}{p.suffix}"
             i = 1
             while out.exists():
-                out = p.parent / f"{base_name}{suffix_str}_{i}{p.suffix}"
+                out = parent_dir / f"{base_name}{suffix_str}_{i}{p.suffix}"
                 i += 1
                 
             final.save(out, quality=100)
@@ -2142,7 +2300,7 @@ class Cropper:
             for side, tile in self.banner_images.items():
                 if tile and side in backup_banners:
                     tile.original = backup_banners[side]
-
+                    
     def on_slider_move(self, val):
         self.strength.set(int(val)); self.lbl_val.config(text=str(int(val)))
         if self.mode_type == "single": self.cancel_pending_preview()
@@ -2217,71 +2375,125 @@ class Cropper:
         gx, gy, gw, gh = metrics['grid']['x'], metrics['grid']['y'], metrics['grid']['w'], metrics['grid']['h']
         indices = range(len(self.grid_tiles)) if only_index == -1 else [only_index]
         
+        fit_mode = self.mode == "fit"
+        cols = self.grid_cols.get()
+        gap = self.grid_gap.get()
+
         for i in indices:
             tile = self.grid_tiles[i]
-            cx, cy, cw, ch = self.get_cell_rect(i, gx, gy, gw, gh)
             
-            self.canvas.create_rectangle(cx, cy, cx+cw, cy+ch, fill=CANVAS_BG, outline="")
+            if fit_mode:
+                row = i // cols
+                col = i % cols
+                
+                row_start = row * cols
+                row_end = min(row_start + cols, len(self.grid_tiles))
+                row_tiles = self.grid_tiles[row_start:row_end]
+                
+                row_ar_sum = 0
+                for t in row_tiles:
+                    if not hasattr(t, 'w') or not hasattr(t, 'h'):
+                        if isinstance(t.original, np.ndarray): t.h, t.w = t.original.shape[:2]
+                        else: t.w, t.h = t.original.size
+                    row_ar_sum += (t.w / t.h)
+                
+                gap_space = (len(row_tiles) - 1) * gap
+                available_w_for_images = gw - gap_space
+                
+                if row_ar_sum == 0: continue
+                
+                row_h = int(available_w_for_images / row_ar_sum)
+                
+                img_ar = tile.w / tile.h
+                img_w = int(row_h * img_ar)
+                
+                current_x = gx
+                for k in range(col):
+                    prev_t = row_tiles[k]
+                    prev_w = int(row_h * (prev_t.w / prev_t.h))
+                    current_x += prev_w + gap
+                
+                current_y = gy
+                for r_idx in range(row):
+                    prev_row_start = r_idx * cols
+                    prev_row_end = min(prev_row_start + cols, len(self.grid_tiles))
+                    prev_row_tiles = self.grid_tiles[prev_row_start:prev_row_end]
+                    prev_row_ar_sum = sum([(t.w/t.h) for t in prev_row_tiles])
+                    prev_gap_space = (len(prev_row_tiles) - 1) * gap
+                    prev_avail_w = gw - prev_gap_space
+                    if prev_row_ar_sum > 0:
+                        current_y += int(prev_avail_w / prev_row_ar_sum) + gap
 
-            if not hasattr(tile, 'w'): tile.h, tile.w = tile.original.shape[:2]
+                cx, cy, cw, ch = current_x, current_y, img_w, row_h
                 
-            img_ratio = tile.w / tile.h
-            cell_ratio = cw / ch
-            
-            if img_ratio > cell_ratio: 
-                base_h = ch
-                base_w = int(base_h * img_ratio)
-            else: 
-                base_w = cw
-                base_h = int(base_w / img_ratio)
+                render_w, render_h = img_w, row_h
+                tile.offset_x, tile.offset_y = 0, 0
                 
-            render_w = int(base_w * tile.scale)
-            render_h = int(base_h * tile.scale)
-            
-            max_off_x = (render_w - cw) / 2
-            max_off_y = (render_h - ch) / 2
-            
-            if render_w < cw: tile.offset_x = 0
-            else: tile.offset_x = max(-max_off_x, min(max_off_x, tile.offset_x))
-            
-            if render_h < ch: tile.offset_y = 0
-            else: tile.offset_y = max(-max_off_y, min(max_off_y, tile.offset_y))
+            else:
+                cx, cy, cw, ch = self.get_cell_rect(i, gx, gy, gw, gh)
+                
+                if not hasattr(tile, 'w'): tile.h, tile.w = tile.original.shape[:2]
+                
+                img_ratio = tile.w / tile.h
+                cell_ratio = cw / ch
+                
+                if img_ratio > cell_ratio: 
+                    base_h = ch
+                    base_w = int(base_h * img_ratio)
+                else: 
+                    base_w = cw
+                    base_h = int(base_w / img_ratio)
+                    
+                render_w = int(base_w * tile.scale)
+                render_h = int(base_h * tile.scale)
+                
+                max_off_x = (render_w - cw) / 2
+                max_off_y = (render_h - ch) / 2
+                
+                if render_w < cw: tile.offset_x = 0
+                else: tile.offset_x = max(-max_off_x, min(max_off_x, tile.offset_x))
+                
+                if render_h < ch: tile.offset_y = 0
+                else: tile.offset_y = max(-max_off_y, min(max_off_y, tile.offset_y))
 
             try:
+                self.canvas.create_rectangle(cx, cy, cx+cw, cy+ch, fill=CANVAS_BG, outline="")
                 
-                is_active = (i == self.active_tile_index)
                 interpolation = cv2.INTER_LANCZOS4
-                
                 if render_w <= 0 or render_h <= 0: continue
-                small = cv2.resize(tile.proxy, (render_w, render_h), interpolation=interpolation)
                 
-                img_cx = render_w // 2
-                img_cy = render_h // 2
-                
-                left = img_cx - (cw // 2) - int(tile.offset_x)
-                top = img_cy - (ch // 2) - int(tile.offset_y)
-                right = left + cw
-                bottom = top + ch
-                
-                src_x_start = max(0, left)
-                src_y_start = max(0, top)
-                src_x_end = min(render_w, right)
-                src_y_end = min(render_h, bottom)
-                
-                dst_w = src_x_end - src_x_start
-                dst_h = src_y_end - src_y_start
-                
-                if dst_w > 0 and dst_h > 0:
-                    cropped = small[src_y_start:src_y_end, src_x_start:src_x_end]
-                    
-                    tk_img = self.cv2_to_imagetk(cropped)
-                    tile.tk_ref = tk_img 
-                    
-                    dest_x = cx + (src_x_start - left)
-                    dest_y = cy + (src_y_start - top)
-                    
+                if fit_mode:
+                    small = cv2.resize(tile.proxy, (render_w, render_h), interpolation=interpolation)
+                    tk_img = self.cv2_to_imagetk(small)
+                    tile.tk_ref = tk_img
                     self.canvas.delete(f"tile_{i}")
-                    self.canvas.create_image(dest_x, dest_y, anchor=NW, image=tk_img, tags=f"tile_{i}")
+                    self.canvas.create_image(cx, cy, anchor=NW, image=tk_img, tags=f"tile_{i}")
+                else:
+                    small = cv2.resize(tile.proxy, (render_w, render_h), interpolation=interpolation)
+                    img_cx = render_w // 2
+                    img_cy = render_h // 2
+                    left = img_cx - (cw // 2) - int(tile.offset_x)
+                    top = img_cy - (ch // 2) - int(tile.offset_y)
+                    right = left + cw
+                    bottom = top + ch
+                    
+                    src_x_start = max(0, left)
+                    src_y_start = max(0, top)
+                    src_x_end = min(render_w, right)
+                    src_y_end = min(render_h, bottom)
+                    
+                    dst_w = src_x_end - src_x_start
+                    dst_h = src_y_end - src_y_start
+                    
+                    if dst_w > 0 and dst_h > 0:
+                        cropped = small[src_y_start:src_y_end, src_x_start:src_x_end]
+                        tk_img = self.cv2_to_imagetk(cropped)
+                        tile.tk_ref = tk_img 
+                        dest_x = cx + (src_x_start - left)
+                        dest_y = cy + (src_y_start - top)
+                        self.canvas.delete(f"tile_{i}")
+                        self.canvas.create_image(dest_x, dest_y, anchor=NW, image=tk_img, tags=f"tile_{i}")
+
             except Exception as e: 
                 print(f"Grid Render Error: {e}")
 
@@ -2376,43 +2588,108 @@ class Cropper:
             cw_standard = (base_grid_w - (gap*(cols-1)))//cols
             ch = (base_grid_h - (gap*(rows-1)))//rows
             
-            for i, tile in enumerate(self.grid_tiles):
-                row = i//cols; col = i%cols
-                if row == rows - 1 and len(self.grid_tiles) % cols != 0:
-                    items_in_row = len(self.grid_tiles) % cols
-                    cw = (base_grid_w - (gap * (items_in_row - 1))) // items_in_row
-                else: cw = cw_standard
+            fit_mode = self.mode == "fit"
 
-                tx = grid_x + col*(cw+gap); ty = grid_y + row*(ch+gap)
+            for i, tile in enumerate(self.grid_tiles):
                 
-                ir = tile.original.width / tile.original.height
-                cr = cw / ch
-                if ir > cr: bh = ch; bw = int(ch*ir)
-                else: bw = cw; bh = int(cw/ir)
-                
-                if ir > cr: bh_save = ch; bw_save = int(ch*ir)
-                else: bw_save = cw; bh_save = int(cw/ir)
-                
-                rw_save = int(bw_save * tile.scale); rh_save = int(bh_save * tile.scale)
-                res = tile.original.resize((rw_save, rh_save), Image.Resampling.LANCZOS)
-                
-                screen_scale = base_grid_w / disp_gw
-                off_x = int(tile.offset_x * screen_scale)
-                off_y = int(tile.offset_y * screen_scale)
-                
-                icx = rw_save//2; icy = rh_save//2
-                l = icx - (cw//2) - off_x
-                t = icy - (ch//2) - off_y
-                crop = res.crop((l, t, l+cw, t+ch))
-                master.paste(crop, (tx, ty))
+                if fit_mode:
+                    row = i // cols
+                    col = i % cols
+                    row_start = row * cols
+                    row_end = min(row_start + cols, len(self.grid_tiles))
+                    row_tiles = self.grid_tiles[row_start:row_end]
+                    
+                    row_ar_sum = 0
+                    for t in row_tiles:
+                        w, h = t.original.width, t.original.height
+                        row_ar_sum += (w / h)
+                    
+                    gap_space = (len(row_tiles) - 1) * gap
+                    avail_w = base_grid_w - gap_space
+                    
+                    if row_ar_sum == 0: continue
+                    
+                    row_h = int(avail_w / row_ar_sum)
+                    
+                    img_w, img_h = tile.original.width, tile.original.height
+                    target_w = int(row_h * (img_w / img_h))
+                    
+                    tx = grid_x
+                    for k in range(col):
+                        pt = row_tiles[k]
+                        pw = int(row_h * (pt.original.width / pt.original.height))
+                        tx += pw + gap
+                        
+                    ty = grid_y
+                    for r_idx in range(row):
+                        pr_start = r_idx * cols
+                        pr_end = min(pr_start + cols, len(self.grid_tiles))
+                        pr_tiles = self.grid_tiles[pr_start:pr_end]
+                        pr_sum = sum([t.original.width/t.original.height for t in pr_tiles])
+                        p_gap = (len(pr_tiles)-1)*gap
+                        if pr_sum > 0:
+                            ty += int((base_grid_w - p_gap)/pr_sum) + gap
+                            
+                    res = tile.original.resize((target_w, row_h), Image.Resampling.LANCZOS)
+                    master.paste(res, (tx, ty))
+                    
+                else:
+                    row = i//cols; col = i%cols
+                    if row == rows - 1 and len(self.grid_tiles) % cols != 0:
+                        items_in_row = len(self.grid_tiles) % cols
+                        cw = (base_grid_w - (gap * (items_in_row - 1))) // items_in_row
+                    else: cw = cw_standard
+
+                    tx = grid_x + col*(cw+gap); ty = grid_y + row*(ch+gap)
+                    
+                    ir = tile.original.width / tile.original.height
+                    cr = cw / ch
+                    
+                    if ir > cr: bh_save = ch; bw_save = int(ch*ir)
+                    else: bw_save = cw; bh_save = int(cw/ir)
+                    
+                    rw_save = int(bw_save * tile.scale); rh_save = int(bh_save * tile.scale)
+                    res = tile.original.resize((rw_save, rh_save), Image.Resampling.LANCZOS)
+                    
+                    screen_scale = base_grid_w / disp_gw
+                    off_x = int(tile.offset_x * screen_scale)
+                    off_y = int(tile.offset_y * screen_scale)
+                    
+                    icx = rw_save//2; icy = rh_save//2
+                    l = icx - (cw//2) - off_x
+                    t = icy - (ch//2) - off_y
+                    crop = res.crop((l, t, l+cw, t+ch))
+                    master.paste(crop, (tx, ty))
 
             prefix = self.settings.get("collage_prefix", "collage_")
             
-            if self.grid_tiles and os.path.exists(self.grid_tiles[0].path):
-                p = Path(self.grid_tiles[0].path)
-                out = p.parent / f"{prefix}{p.stem}.jpg"
-            else: 
-                out = Path(f"{prefix}saved.jpg")
+            custom_out = self.settings.get("output_folder", "")
+            
+            if custom_out and os.path.isdir(custom_out):
+                parent_dir = Path(custom_out)
+                if self.grid_tiles and os.path.exists(self.grid_tiles[0].path):
+                    p = Path(self.grid_tiles[0].path)
+                    base_name = f"{prefix}{p.stem}"
+                else:
+                    base_name = f"{prefix}saved"
+            else:
+                if self.grid_tiles and os.path.exists(self.grid_tiles[0].path):
+                    p = Path(self.grid_tiles[0].path)
+                    parent_dir = p.parent
+                    base_name = f"{prefix}{p.stem}"
+                else: 
+                    parent_dir = Path(".")
+                    base_name = f"{prefix}saved"
+            
+            out = parent_dir / f"{base_name}.jpg"
+            
+            i = 1
+            while out.exists():
+                out = parent_dir / f"{base_name}_{i}.jpg"
+                i += 1
+
+            master.save(out, quality=100)
+            self.show_status(f"Saved: {out.name}")
             
         finally:
             for i, tile in enumerate(self.grid_tiles):
