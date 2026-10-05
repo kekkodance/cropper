@@ -1,10 +1,10 @@
-<h1 align="center">
-  <img src="https://raw.githubusercontent.com/kekkodance/cropper/main/icon.ico" width="40">
-  cropper
-</h1>
-<p align="center">
-<strong>A tool to easily create cropped or blurred/pixelated versions of your artwork.</strong>
-</p>
+<div align="center">
+  <h1>
+    <img src="https://raw.githubusercontent.com/kekkodance/cropper/main/icon.ico" width="48" height="48" valign="middle" alt="cropper logo" />
+    cropper
+  </h1>
+  <p>A tool to easily create cropped or blurred/pixelated versions of your artwork.</p>
+</div>
 
 ---
 
